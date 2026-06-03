@@ -651,6 +651,8 @@ name = "mercurio-ai"
 version = "0.1.0"
 dependencies = [
  "mercurio-foundation",
+ "mercurio-reasoner-api",
+ "mercurio-reference-capabilities",
  "mercurio-requirements",
  "mercurio-sysml",
  "reqwest",
@@ -714,6 +716,35 @@ dependencies = [
  "mercurio-kir",
  "mercurio-language-contracts",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mercurio-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "mercurio-reasoner-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mercurio-reasoner-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mercurio-reference-capabilities"
+version = "0.1.0"
+dependencies = [
+ "mercurio-foundation",
+ "mercurio-plugin-api",
+ "mercurio-reasoner-api",
+ "mercurio-requirements",
+ "mercurio-sysml",
  "serde_json",
 ]
 

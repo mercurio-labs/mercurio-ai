@@ -1,21 +1,35 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use mercurio_core::runtime::Runtime;
+use mercurio_core::{
+    CapabilityRegistry, CapabilityRunReport, CapabilityRunRequest, CapabilityTarget,
+    SemanticWorkspaceSnapshot,
+};
+use mercurio_reasoner_api::{
+    FindingSeverity, ReasoningReport, SemanticArtifactRef, SemanticContextKind, SemanticContextRef,
+};
+use mercurio_reference_capabilities::{
+    analyze_requirement_coverage, analyze_semantic_impact, analyze_state_machine_simulation,
+};
+
 pub use mercurio_core::{
-    CoreMutationFeasibilityService, ElementRef, FeasibilityStatus, GoalEvaluation,
+    CoreMutationFeasibilityService, ElementRef, FeasibilityStatus, GoalEvaluation, KirDocument,
     MutationApplicationResult, MutationContext, MutationEvidence, MutationFeasibilityReport,
     MutationFeasibilityService, MutationProposal, SemanticExpression, SemanticGoalCheck,
     SemanticGoalExplanation, SemanticGoalSpec, SemanticMutation, SemanticMutationCapabilityContext,
-    SemanticReasoningContext, WorkspaceRevision,
+    SemanticReasoningContext, WorkspaceRevision, default_stdlib_path,
 };
 pub use mercurio_requirements::{
     default_model_quality_profile, evaluate_semantic_goal, explain_semantic_goal,
 };
 pub use mercurio_sysml::{
-    enrich_sysml_semantic_reasoning_context_with_child_affordances,
+    compile_sysml_text, enrich_sysml_semantic_reasoning_context_with_child_affordances,
     load_authoring_project_from_sysml, sysml_mutation_feasibility_service,
     sysml_semantic_mutation_capability_context,
     sysml_semantic_reasoning_context_from_authoring_project,
@@ -304,6 +318,8 @@ pub struct SemanticMutationProposalRequest {
     pub quality_goal_guidance: Option<SemanticGoalExplanation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_context: Option<SemanticReasoningContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_tool_results: Vec<SemanticAgentToolResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -331,6 +347,10 @@ pub struct SemanticAgentRunRequest {
     #[serde(default)]
     pub focus: Vec<ElementRef>,
     pub max_steps: usize,
+    #[serde(default)]
+    pub reasoning_tools: Vec<SemanticAgentToolKind>,
+    #[serde(default)]
+    pub tool_mode: SemanticAgentToolMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -351,6 +371,45 @@ pub enum SemanticAgentRunStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticAgentToolKind {
+    RequirementCoverage,
+    SemanticImpact,
+    StateSimulation,
+    ModelInspection,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticAgentToolMode {
+    Off,
+    RequestedOnly,
+    #[default]
+    Auto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticAgentToolFinding {
+    pub id: String,
+    pub severity: String,
+    pub title: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elements: Vec<ElementRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticAgentToolResult {
+    pub tool: SemanticAgentToolKind,
+    pub status: String,
+    pub summary: Vec<String>,
+    pub findings: Vec<SemanticAgentToolFinding>,
+    pub artifact: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticAgentStep {
@@ -359,6 +418,8 @@ pub struct SemanticAgentStep {
     pub semantic_context: SemanticReasoningContext,
     pub goal_evaluation: Option<GoalEvaluation>,
     pub quality_evaluation: Option<GoalEvaluation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_results: Vec<SemanticAgentToolResult>,
     pub proposals: Vec<CheckedMutationProposal>,
     pub selected_proposal_index: Option<usize>,
     pub applied: Option<MutationApplicationResult>,
@@ -372,6 +433,7 @@ pub fn run_semantic_mutation_agent<P>(
 where
     P: SemanticMutationProposalProvider,
 {
+    let selected_tools = select_semantic_agent_tools(&request);
     let mut files = request.initial_files;
     let mut project = match load_authoring_project_from_sysml(files.clone()) {
         Ok(project) => project,
@@ -405,6 +467,13 @@ where
             128,
         );
         enrich_sysml_semantic_reasoning_context_with_child_affordances(&mut semantic_context, 192);
+        let tool_results = run_semantic_agent_tools(
+            &selected_tools,
+            &files,
+            &context.workspace_revision,
+            &request.goal,
+            index,
+        );
         let proposal_request = SemanticMutationProposalRequest {
             design_intent: request.goal.clone(),
             workspace_revision: context.workspace_revision.clone(),
@@ -412,6 +481,7 @@ where
             task_goal_guidance: goal_spec.as_ref().map(explain_semantic_goal),
             quality_goal_guidance: quality_goal.as_ref().map(explain_semantic_goal),
             semantic_context: Some(semantic_context.clone()),
+            reasoning_tool_results: tool_results.clone(),
         };
         let proposals =
             propose_checked_semantic_mutations(provider, &feasibility, &context, &proposal_request);
@@ -447,6 +517,7 @@ where
                     &context.project,
                     &request.focus,
                 ),
+                tool_results,
                 proposals,
                 selected_proposal_index: None,
                 applied: None,
@@ -486,6 +557,7 @@ where
                         &context.project,
                         &request.focus,
                     ),
+                    tool_results,
                     proposals,
                     selected_proposal_index: Some(selected_index),
                     applied: None,
@@ -522,6 +594,7 @@ where
                         &context.project,
                         &request.focus,
                     ),
+                    tool_results,
                     proposals,
                     selected_proposal_index: Some(selected_index),
                     applied: Some(applied),
@@ -555,6 +628,7 @@ where
             semantic_context,
             goal_evaluation,
             quality_evaluation,
+            tool_results,
             proposals,
             selected_proposal_index: Some(selected_index),
             applied: Some(applied),
@@ -600,6 +674,381 @@ fn evaluate_current_goal(
         128,
     );
     Some(evaluate_semantic_goal(&semantic_context, goal))
+}
+
+fn select_semantic_agent_tools(request: &SemanticAgentRunRequest) -> Vec<SemanticAgentToolKind> {
+    let mut tools = request
+        .reasoning_tools
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    match request.tool_mode {
+        SemanticAgentToolMode::Off => return Vec::new(),
+        SemanticAgentToolMode::RequestedOnly => {}
+        SemanticAgentToolMode::Auto => {
+            let goal = request.goal.to_ascii_lowercase();
+            if goal.contains("requirement")
+                || goal.contains("satisfy")
+                || goal.contains("verify")
+                || goal.contains("coverage")
+            {
+                tools.insert(SemanticAgentToolKind::RequirementCoverage);
+            }
+            if goal.contains("impact")
+                || goal.contains("risk")
+                || goal.contains("change")
+                || goal.contains("affected")
+            {
+                tools.insert(SemanticAgentToolKind::SemanticImpact);
+            }
+            if goal.contains("state")
+                || goal.contains("transition")
+                || goal.contains("simulate")
+                || goal.contains("simulation")
+            {
+                tools.insert(SemanticAgentToolKind::StateSimulation);
+            }
+            if goal.contains("metamodel")
+                || goal.contains("metatype")
+                || goal.contains("inspect")
+                || goal.contains("lookup")
+                || goal.contains("attribute")
+                || goal.contains("attributes")
+                || goal.contains("property")
+                || goal.contains("properties")
+                || goal.contains("what is")
+                || goal.contains("what are")
+            {
+                tools.insert(SemanticAgentToolKind::ModelInspection);
+            }
+        }
+    }
+    tools.into_iter().collect()
+}
+
+fn run_semantic_agent_tools(
+    tools: &[SemanticAgentToolKind],
+    files: &BTreeMap<String, String>,
+    workspace_revision: &WorkspaceRevision,
+    goal: &str,
+    step_index: usize,
+) -> Vec<SemanticAgentToolResult> {
+    if tools.is_empty() {
+        return Vec::new();
+    }
+    if tools
+        .iter()
+        .all(|tool| *tool == SemanticAgentToolKind::ModelInspection)
+    {
+        return tools
+            .iter()
+            .copied()
+            .map(|tool| run_model_inspection_tool(tool, files, goal, step_index))
+            .collect();
+    }
+    let document = match compile_agent_kir_document(files) {
+        Ok(document) => document,
+        Err(err) => {
+            return tools
+                .iter()
+                .copied()
+                .map(|tool| tool_error_result(tool, err.clone()))
+                .collect();
+        }
+    };
+    let runtime = match Runtime::from_document(document) {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            return tools
+                .iter()
+                .copied()
+                .map(|tool| tool_error_result(tool, format!("failed to build runtime: {err}")))
+                .collect();
+        }
+    };
+    let context = agent_tool_context(workspace_revision);
+    tools
+        .iter()
+        .copied()
+        .map(|tool| {
+            let request_id = format!(
+                "semantic_agent.step{step_index}.{}",
+                semantic_agent_tool_id(tool)
+            );
+            let report = match tool {
+                SemanticAgentToolKind::RequirementCoverage => {
+                    analyze_requirement_coverage(&runtime, context.clone(), request_id)
+                }
+                SemanticAgentToolKind::SemanticImpact => {
+                    analyze_semantic_impact(&runtime, context.clone(), request_id)
+                }
+                SemanticAgentToolKind::StateSimulation => {
+                    analyze_state_machine_simulation(&runtime, context.clone(), request_id)
+                }
+                SemanticAgentToolKind::ModelInspection => {
+                    return run_model_inspection_tool(tool, files, goal, step_index);
+                }
+            };
+            tool_result_from_report(tool, report)
+        })
+        .collect()
+}
+
+fn run_model_inspection_tool(
+    tool: SemanticAgentToolKind,
+    files: &BTreeMap<String, String>,
+    goal: &str,
+    step_index: usize,
+) -> SemanticAgentToolResult {
+    let snapshot = match compile_agent_inspection_snapshot(files) {
+        Ok(snapshot) => snapshot,
+        Err(err) => return tool_error_result(tool, err),
+    };
+    let registry = CapabilityRegistry::with_foundation_builtins();
+    let run_id = format!(
+        "semantic_agent.step{step_index}.{}",
+        semantic_agent_tool_id(tool)
+    );
+    let report = match registry.run(
+        &snapshot,
+        CapabilityRunRequest {
+            run_id,
+            capability_id: "foundation.inspect.model".to_string(),
+            target: CapabilityTarget::Workspace,
+            parameters: BTreeMap::from([
+                ("query".to_string(), Value::String(goal.to_string())),
+                ("limit".to_string(), Value::from(8)),
+            ]),
+            input_artifacts: Vec::new(),
+        },
+    ) {
+        Ok(report) => report,
+        Err(err) => return tool_error_result(tool, err.to_string()),
+    };
+    tool_result_from_capability_report(tool, report)
+}
+
+fn compile_agent_inspection_snapshot(
+    files: &BTreeMap<String, String>,
+) -> Result<SemanticWorkspaceSnapshot, String> {
+    let stdlib = KirDocument::from_path(Path::new(&default_stdlib_path()))
+        .map_err(|err| format!("failed to load bundled stdlib: {err}"))?;
+    let mut documents = vec![stdlib.clone()];
+    for (path, content) in files {
+        let document = compile_sysml_text(content, path, &stdlib)
+            .map_err(|err| format!("failed to compile {path}: {err}"))?;
+        documents.push(document);
+    }
+    let document = KirDocument::merge(documents)
+        .map_err(|err| format!("failed to merge KIR documents: {err}"))?;
+    SemanticWorkspaceSnapshot::from_document_with_profile(document, Some("sysml".to_string()))
+        .map_err(|err| format!("failed to build inspection snapshot: {err}"))
+}
+
+fn compile_agent_kir_document(files: &BTreeMap<String, String>) -> Result<KirDocument, String> {
+    let stdlib = KirDocument::from_path(Path::new(&default_stdlib_path()))
+        .map_err(|err| format!("failed to load bundled stdlib: {err}"))?;
+    let mut documents = Vec::new();
+    for (path, content) in files {
+        let document = compile_sysml_text(content, path, &stdlib)
+            .map_err(|err| format!("failed to compile {path}: {err}"))?;
+        documents.push(document);
+    }
+    KirDocument::merge(documents).map_err(|err| format!("failed to merge KIR documents: {err}"))
+}
+
+fn agent_tool_context(workspace_revision: &WorkspaceRevision) -> SemanticContextRef {
+    SemanticContextRef {
+        context_id: "semantic_agent".to_string(),
+        kind: SemanticContextKind::DraftOverlay {
+            overlay_digest: workspace_revision.fingerprint.clone(),
+        },
+        artifact: SemanticArtifactRef {
+            artifact_key: format!("semantic-agent:{}", workspace_revision.fingerprint),
+            kir_schema_version: "mercurio.kir.v1".to_string(),
+            source_authority: Some("semantic_agent".to_string()),
+            source_revision: Some(workspace_revision.fingerprint.clone()),
+        },
+    }
+}
+
+fn tool_result_from_report(
+    tool: SemanticAgentToolKind,
+    report: ReasoningReport,
+) -> SemanticAgentToolResult {
+    let summary = reasoning_report_summary(&report);
+    let findings = report
+        .findings
+        .iter()
+        .take(12)
+        .map(|finding| SemanticAgentToolFinding {
+            id: finding.id.clone(),
+            severity: severity_label(&finding.severity).to_string(),
+            title: finding.title.clone(),
+            message: finding.message.clone(),
+            elements: finding
+                .elements
+                .iter()
+                .map(|element| {
+                    ElementRef::new(
+                        element
+                            .qualified_name
+                            .clone()
+                            .unwrap_or_else(|| element.element_id.clone()),
+                    )
+                })
+                .collect(),
+        })
+        .collect();
+    let artifact = json!({
+        "requestId": report.request_id,
+        "capability": report.capability.id,
+        "status": report.status.clone(),
+        "artifacts": report.artifacts,
+        "evidenceNodeCount": report.evidence.nodes.len(),
+        "evidenceEdgeCount": report.evidence.edges.len(),
+    });
+    SemanticAgentToolResult {
+        tool,
+        status: serde_json::to_value(&report.status)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("{:?}", report.status)),
+        summary,
+        findings,
+        artifact,
+    }
+}
+
+fn tool_result_from_capability_report(
+    tool: SemanticAgentToolKind,
+    report: CapabilityRunReport,
+) -> SemanticAgentToolResult {
+    let summary = capability_report_summary(&report);
+    let findings = report
+        .insights
+        .iter()
+        .take(12)
+        .map(|insight| SemanticAgentToolFinding {
+            id: insight.id.clone(),
+            severity: format!("{:?}", insight.severity).to_ascii_lowercase(),
+            title: format!("{:?}", insight.kind),
+            message: insight.claim.clone(),
+            elements: vec![ElementRef::new(
+                insight
+                    .subject
+                    .qualified_name
+                    .clone()
+                    .unwrap_or_else(|| insight.subject.element_id.clone()),
+            )],
+        })
+        .collect();
+    let artifact = json!({
+        "runId": report.run_id,
+        "capability": report.capability_id,
+        "status": format!("{:?}", report.status),
+        "artifacts": report.artifacts,
+        "evidenceNodeCount": report.evidence.nodes.len(),
+        "evidenceEdgeCount": report.evidence.edges.len(),
+    });
+    SemanticAgentToolResult {
+        tool,
+        status: format!("{:?}", report.status).to_ascii_lowercase(),
+        summary,
+        findings,
+        artifact,
+    }
+}
+
+fn reasoning_report_summary(report: &ReasoningReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{} returned {:?} with {} finding(s).",
+        report.capability.name,
+        report.status,
+        report.findings.len()
+    ));
+    for artifact in &report.artifacts {
+        if let Some(object) = artifact.payload.as_object() {
+            let parts = object
+                .iter()
+                .take(6)
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>();
+            if !parts.is_empty() {
+                lines.push(format!("{}: {}", artifact.kind, parts.join(", ")));
+            }
+        }
+    }
+    for finding in report.findings.iter().take(5) {
+        lines.push(format!(
+            "[{}] {}: {}",
+            severity_label(&finding.severity),
+            finding.title,
+            finding.message
+        ));
+    }
+    lines
+}
+
+fn capability_report_summary(report: &CapabilityRunReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{} returned {:?} with {} insight(s).",
+        report.capability_id,
+        report.status,
+        report.insights.len()
+    ));
+    for artifact in &report.artifacts {
+        if let Some(object) = artifact.payload.as_object() {
+            let parts = object
+                .iter()
+                .take(8)
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>();
+            if !parts.is_empty() {
+                lines.push(format!("{}: {}", artifact.kind, parts.join(", ")));
+            }
+        }
+    }
+    for insight in report.insights.iter().take(5) {
+        lines.push(insight.claim.clone());
+    }
+    lines
+}
+
+fn tool_error_result(tool: SemanticAgentToolKind, message: String) -> SemanticAgentToolResult {
+    SemanticAgentToolResult {
+        tool,
+        status: "error".to_string(),
+        summary: vec![message.clone()],
+        findings: vec![SemanticAgentToolFinding {
+            id: format!("semantic_agent.tool_error.{}", semantic_agent_tool_id(tool)),
+            severity: "error".to_string(),
+            title: "Reasoning tool failed".to_string(),
+            message,
+            elements: Vec::new(),
+        }],
+        artifact: json!({}),
+    }
+}
+
+fn semantic_agent_tool_id(tool: SemanticAgentToolKind) -> &'static str {
+    match tool {
+        SemanticAgentToolKind::RequirementCoverage => "requirement_coverage",
+        SemanticAgentToolKind::SemanticImpact => "semantic_impact",
+        SemanticAgentToolKind::StateSimulation => "state_simulation",
+        SemanticAgentToolKind::ModelInspection => "model_inspection",
+    }
+}
+
+fn severity_label(severity: &FindingSeverity) -> &'static str {
+    match severity {
+        FindingSeverity::Info => "info",
+        FindingSeverity::Warning => "warning",
+        FindingSeverity::Error => "error",
+        FindingSeverity::Critical => "critical",
+    }
 }
 
 pub fn propose_checked_semantic_mutations<P, F>(
@@ -874,8 +1323,7 @@ fn ask_mercurio_with_provider(
     let chat = provider
         .complete_chat(&chat_request)
         .unwrap_or_else(|_| heuristic_provider().complete_chat(&chat_request).unwrap());
-    let citations =
-        ask_mercurio_citations(project.as_ref(), latest_user_content(&request.messages));
+    let citations = ask_mercurio_citations(project.as_ref(), &chat.message);
     let artifacts = ask_mercurio_artifacts(
         &task,
         project.as_ref(),
@@ -1513,6 +1961,7 @@ fn request_openai_text(
                  - Treat live editor/workspace snapshots as newer and more authoritative than chat history, compiled metadata, or prior assistant messages.\n\
                  - Do not claim a file, package, requirement, element, relationship, diagram, commit, or edit exists unless it appears in the supplied current workspace context or validated tool output.\n\
                  - If prior chat says something was created but the current workspace snapshot does not contain it, say it is not present in the current model.\n\
+                 - If context includes `Metamodel lookup result:` lines, treat them as authoritative KIR evidence and do not substitute generic SysML, UML, or modeling-language knowledge.\n\
                  - For questions asking what is in the current model, summarize only elements present in the current workspace context and state when expected evidence is missing.\n\n{}",
                 request.context.join("\n")
             ),
@@ -2087,17 +2536,18 @@ fn ask_mercurio_developer_context(task: &AskMercurioTask) -> String {
         }
     };
     format!(
-        "You are Ask Mercurio. {task_detail} Be concise, engineering-focused, and explicit when evidence is missing."
+        "You are Ask Mercurio. {task_detail} Be concise, engineering-focused, and explicit when evidence is missing. If context includes `Metamodel lookup result:` lines, treat them as authoritative KIR evidence and do not substitute generic SysML, UML, or modeling-language knowledge."
     )
 }
 
 fn ask_mercurio_citations(
     project: Option<&AskMercurioProjectContext>,
-    prompt: &str,
+    response: &str,
 ) -> Vec<AskMercurioCitation> {
     let mut citations = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     if let Some(project) = project {
-        citations.push(AskMercurioCitation {
+        let citation = AskMercurioCitation {
             label: project
                 .project_name
                 .as_deref()
@@ -2105,31 +2555,71 @@ fn ask_mercurio_citations(
                 .to_string(),
             target_type: "project".to_string(),
             target_id: project.project_id.clone(),
-        });
+        };
+        seen.insert((citation.target_type.clone(), citation.target_id.clone()));
+        citations.push(citation);
         if let Some(artifact_id) = &project.artifact_id {
-            citations.push(AskMercurioCitation {
+            let citation = AskMercurioCitation {
                 label: "Latest semantic artifact".to_string(),
                 target_type: "artifact".to_string(),
                 target_id: artifact_id.clone(),
-            });
+            };
+            seen.insert((citation.target_type.clone(), citation.target_id.clone()));
+            citations.push(citation);
+        }
+        if let Some(root_id) = &project.diagram_root_id
+            && response.contains(root_id)
+        {
+            let citation = AskMercurioCitation {
+                label: project
+                    .diagram_root_label
+                    .as_deref()
+                    .unwrap_or(root_id)
+                    .to_string(),
+                target_type: "element".to_string(),
+                target_id: root_id.clone(),
+            };
+            seen.insert((citation.target_type.clone(), citation.target_id.clone()));
+            citations.push(citation);
         }
     }
-    for token in prompt
+    for token in response
         .split_whitespace()
-        .filter(|token| token.contains('.'))
-        .take(3)
+        .filter_map(normalize_response_element_hint)
+        .filter(|token| token.contains('.') || token.contains("::"))
     {
+        if citations.len() >= 6 {
+            break;
+        }
+        let target_id = token.replace("::", ".");
+        if !seen.insert(("element_hint".to_string(), target_id.clone())) {
+            continue;
+        }
         citations.push(AskMercurioCitation {
-            label: token
-                .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.')
-                .to_string(),
+            label: target_id.clone(),
             target_type: "element_hint".to_string(),
-            target_id: token
-                .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.')
-                .to_string(),
+            target_id,
         });
     }
     citations
+}
+
+fn normalize_response_element_hint(token: &str) -> Option<String> {
+    let trimmed = token.trim_matches(|ch: char| {
+        !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == ':')
+    });
+    if trimmed.is_empty()
+        || trimmed.starts_with("http")
+        || trimmed.ends_with('.')
+        || trimmed
+            .chars()
+            .filter(|ch| *ch == '.' || *ch == ':')
+            .count()
+            == 0
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 fn ask_mercurio_artifacts(
@@ -2318,7 +2808,8 @@ fn semantic_mutation_proposal_developer_prompt() -> &'static str {
      inside ElementRef. Do not propose adding an element that already appears in \
      semantic_context.elements. Prefer one coherent batch of 2 to 5 non-empty operations \
      when the required containers and types already exist. For an empty model, create only \
-     the root package first. Requirement definitions should have explicit id and text \
+     the root package first. Use RemoveDeclaration or RemoveUsage for cleanup when \
+     simplification is requested and the target exists. Requirement definitions should have explicit id and text \
      attributes; use SetAttribute on existing requirement elements to fill missing fields. \
      Core feasibility will reject impossible changes."
 }
@@ -2517,6 +3008,56 @@ fn semantic_mutation_proposal_schema() -> Value {
                     }
                 },
                 "required": ["AddRelationship"]
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "RemoveDeclaration": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "element": element_ref.clone()
+                        },
+                        "required": ["element"]
+                    }
+                },
+                "required": ["RemoveDeclaration"]
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "RemoveUsage": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "element": element_ref.clone()
+                        },
+                        "required": ["element"]
+                    }
+                },
+                "required": ["RemoveUsage"]
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "RemoveRelationship": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": capability_context.relationship_kinds
+                            },
+                            "source": element_ref.clone(),
+                            "target": element_ref.clone()
+                        },
+                        "required": ["kind", "source", "target"]
+                    }
+                },
+                "required": ["RemoveRelationship"]
             },
             {
                 "type": "object",
@@ -2823,6 +3364,7 @@ package HybridVehicle {
             task_goal_guidance: None,
             quality_goal_guidance: None,
             semantic_context: None,
+            reasoning_tool_results: Vec::new(),
         });
 
         assert_eq!(proposals.len(), 1);
@@ -2867,6 +3409,7 @@ package HybridVehicle {
                 &default_model_quality_profile().goal,
             )),
             semantic_context: Some(semantic_context),
+            reasoning_tool_results: Vec::new(),
         };
         let prompt = semantic_mutation_proposal_user_prompt(&request);
 
@@ -2891,6 +3434,7 @@ package HybridVehicle {
             task_goal_guidance: None,
             quality_goal_guidance: None,
             semantic_context: None,
+            reasoning_tool_results: Vec::new(),
         };
 
         let proposals = parse_semantic_mutation_proposals_payload(
@@ -2959,6 +3503,7 @@ package HybridVehicle {
                 task_goal_guidance: None,
                 quality_goal_guidance: None,
                 semantic_context: None,
+                reasoning_tool_results: Vec::new(),
             },
         );
 
@@ -3004,6 +3549,7 @@ package HybridVehicle {
                 task_goal_guidance: None,
                 quality_goal_guidance: None,
                 semantic_context: None,
+                reasoning_tool_results: Vec::new(),
             },
         );
 
@@ -3031,6 +3577,8 @@ package HybridVehicle {
                 initial_files: BTreeMap::new(),
                 focus: Vec::new(),
                 max_steps: 8,
+                reasoning_tools: Vec::new(),
+                tool_mode: crate::SemanticAgentToolMode::Off,
             },
         );
 
@@ -3076,6 +3624,8 @@ package HybridVehicle {
                 )]),
                 focus: Vec::new(),
                 max_steps: 4,
+                reasoning_tools: Vec::new(),
+                tool_mode: crate::SemanticAgentToolMode::Off,
             },
         );
 
@@ -3086,6 +3636,54 @@ package HybridVehicle {
                 .get("model.sysml")
                 .is_some_and(|source| source.contains("part def UAVInterceptor"))
         );
+    }
+
+    #[test]
+    fn semantic_agent_auto_runs_reasoning_tools_before_proposing() {
+        let run = run_semantic_mutation_agent(
+            &RequestRevisionProposalProvider,
+            SemanticAgentRunRequest {
+                goal: "Create a UAV interceptor and improve requirement coverage".to_string(),
+                goal_spec: None,
+                quality_goal: Some(default_model_quality_profile().goal),
+                minimum_quality_score: Some(0.5),
+                initial_files: BTreeMap::from([(
+                    "model.sysml".to_string(),
+                    "package Demo {}".to_string(),
+                )]),
+                focus: Vec::new(),
+                max_steps: 1,
+                reasoning_tools: Vec::new(),
+                tool_mode: crate::SemanticAgentToolMode::Auto,
+            },
+        );
+
+        assert!(
+            run.steps
+                .first()
+                .is_some_and(|step| step.tool_results.iter().any(|result| {
+                    result.tool == crate::SemanticAgentToolKind::RequirementCoverage
+                        && !result.summary.is_empty()
+                })),
+            "{run:#?}"
+        );
+    }
+
+    #[test]
+    fn semantic_agent_auto_runs_model_inspection_for_metamodel_questions() {
+        let tools = crate::select_semantic_agent_tools(&SemanticAgentRunRequest {
+            goal: "What are the attributes of metamodel Element?".to_string(),
+            goal_spec: None,
+            quality_goal: None,
+            minimum_quality_score: None,
+            initial_files: BTreeMap::new(),
+            focus: Vec::new(),
+            max_steps: 1,
+            reasoning_tools: Vec::new(),
+            tool_mode: crate::SemanticAgentToolMode::Auto,
+        });
+
+        assert!(tools.contains(&crate::SemanticAgentToolKind::ModelInspection));
     }
 
     #[test]
@@ -3114,6 +3712,7 @@ package HybridVehicle {
                     &default_model_quality_profile().goal,
                 )),
                 semantic_context: None,
+                reasoning_tool_results: Vec::new(),
             },
         );
 
@@ -3172,6 +3771,7 @@ package HybridVehicle {
                 &default_model_quality_profile().goal,
             )),
             semantic_context: None,
+            reasoning_tool_results: Vec::new(),
         };
         println!("design intent: {}", request.design_intent);
         println!(
@@ -3298,6 +3898,8 @@ package HybridVehicle {
                 initial_files: BTreeMap::new(),
                 focus: Vec::new(),
                 max_steps: 8,
+                reasoning_tools: Vec::new(),
+                tool_mode: crate::SemanticAgentToolMode::Auto,
             },
         );
 

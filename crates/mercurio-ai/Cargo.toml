@@ -8,6 +8,8 @@ license.workspace = true
 mercurio-core = { package = "mercurio-foundation", path = "../../../mercurio-foundation/crates/mercurio-foundation" }
 mercurio-requirements = { path = "../../../mercurio-sysml/crates/mercurio-requirements" }
 mercurio-sysml = { path = "../../../mercurio-sysml/crates/mercurio-sysml" }
+mercurio-reference-capabilities = { path = "../../../mercurio-plugins/crates/mercurio-reference-capabilities" }
+mercurio-reasoner-api = { path = "../../../mercurio-plugins/crates/mercurio-reasoner-api" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
