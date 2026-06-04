@@ -41,6 +41,10 @@ pub use mercurio_sysml::{
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1/responses";
 const DEFAULT_AZURE_OPENAI_PATH: &str = "/openai/v1/responses";
+const DEFAULT_ANTHROPIC_PROPOSAL_MODEL: &str = "claude-opus-4-8";
+const DEFAULT_ANTHROPIC_FAST_MODEL: &str = "claude-sonnet-4-6";
+const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,6 +53,7 @@ pub enum ReasoningProviderKind {
     Heuristic,
     OpenAi,
     AzureOpenAi,
+    Anthropic,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,11 +259,29 @@ struct SemanticMutationProposalEnvelope {
     proposals: Vec<MutationProposal>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AnthropicMessageResponse {
+    #[serde(default)]
+    content: Vec<AnthropicContentItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum AnthropicContentItem {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse { input: Value },
+    #[serde(other)]
+    Other,
+}
+
 #[derive(Debug, Clone)]
 pub enum ResolvedReasoningProvider {
     Heuristic(HeuristicReasoningProvider),
     OpenAi(OpenAiReasoningProvider),
     AzureOpenAi(AzureOpenAiReasoningProvider),
+    Anthropic(AnthropicReasoningProvider),
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +304,17 @@ pub struct AzureOpenAiReasoningProvider {
     client: Client,
     api_key: String,
     deployment: String,
+    base_url: String,
+    status: ReasoningProviderStatus,
+    fallback: HeuristicReasoningProvider,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnthropicReasoningProvider {
+    client: Client,
+    api_key: String,
+    proposal_model: String,
+    fast_model: String,
     base_url: String,
     status: ReasoningProviderStatus,
     fallback: HeuristicReasoningProvider,
@@ -1580,6 +1614,7 @@ fn checked_proposal_id(report: &MutationFeasibilityReport) -> Option<String> {
 pub struct ReasoningProviderSecretOverrides {
     pub openai_api_key: Option<String>,
     pub azure_openai_api_key: Option<String>,
+    pub anthropic_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1589,6 +1624,9 @@ pub struct ReasoningProviderConfigOverrides {
     pub openai_base_url: Option<String>,
     pub azure_openai_deployment: Option<String>,
     pub azure_openai_base_url: Option<String>,
+    pub anthropic_proposal_model: Option<String>,
+    pub anthropic_fast_model: Option<String>,
+    pub anthropic_base_url: Option<String>,
 }
 
 pub fn default_reasoning_provider() -> ResolvedReasoningProvider {
@@ -1634,6 +1672,9 @@ pub fn configured_reasoning_provider(
                 .map(ResolvedReasoningProvider::AzureOpenAi)
                 .unwrap_or_else(|| ResolvedReasoningProvider::Heuristic(heuristic_provider()))
         }
+        Some(ReasoningProviderKind::Anthropic) => anthropic_provider_from_config(&config, &secrets)
+            .map(ResolvedReasoningProvider::Anthropic)
+            .unwrap_or_else(|| ResolvedReasoningProvider::Heuristic(heuristic_provider())),
         Some(ReasoningProviderKind::OpenAi) => openai_provider_from_config(&config, &secrets)
             .map(ResolvedReasoningProvider::OpenAi)
             .unwrap_or_else(|| ResolvedReasoningProvider::Heuristic(heuristic_provider())),
@@ -1716,6 +1757,25 @@ pub fn test_configured_reasoning_provider_connection(
                 }
                 format!(
                     "OpenAI settings are incomplete. Missing {}.",
+                    missing.join(", ")
+                )
+            })?;
+            provider.test_connection()
+        }
+        Some(ReasoningProviderKind::Anthropic) => {
+            let provider = anthropic_provider_from_config(&config, &secrets).ok_or_else(|| {
+                let mut missing = Vec::new();
+                if secrets
+                    .anthropic_api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                {
+                    missing.push("stored API key");
+                }
+                format!(
+                    "Anthropic settings are incomplete. Missing {}.",
                     missing.join(", ")
                 )
             })?;
@@ -1829,6 +1889,16 @@ pub fn complete_configured_chat(
             })?;
             provider.complete_chat(request)
         }
+        Some(ReasoningProviderKind::Anthropic) => {
+            let provider = anthropic_provider_from_config(&config, &secrets).ok_or_else(|| {
+                configured_provider_missing_message(
+                    &config,
+                    &secrets,
+                    ReasoningProviderKind::Anthropic,
+                )
+            })?;
+            provider.complete_chat(request)
+        }
         Some(ReasoningProviderKind::Heuristic) => heuristic_provider().complete_chat(request),
         _ => complete_chat_with_secret_overrides(request, secrets),
     }
@@ -1840,6 +1910,7 @@ impl ReasoningProvider for ResolvedReasoningProvider {
             Self::Heuristic(provider) => provider.provider_status(),
             Self::OpenAi(provider) => provider.provider_status(),
             Self::AzureOpenAi(provider) => provider.provider_status(),
+            Self::Anthropic(provider) => provider.provider_status(),
         }
     }
 
@@ -1848,6 +1919,7 @@ impl ReasoningProvider for ResolvedReasoningProvider {
             Self::Heuristic(provider) => provider.test_connection(),
             Self::OpenAi(provider) => provider.test_connection(),
             Self::AzureOpenAi(provider) => provider.test_connection(),
+            Self::Anthropic(provider) => provider.test_connection(),
         }
     }
 
@@ -1859,6 +1931,7 @@ impl ReasoningProvider for ResolvedReasoningProvider {
             Self::Heuristic(provider) => provider.summarize_semantic_changes(request),
             Self::OpenAi(provider) => provider.summarize_semantic_changes(request),
             Self::AzureOpenAi(provider) => provider.summarize_semantic_changes(request),
+            Self::Anthropic(provider) => provider.summarize_semantic_changes(request),
         }
     }
 
@@ -1870,6 +1943,7 @@ impl ReasoningProvider for ResolvedReasoningProvider {
             Self::Heuristic(provider) => provider.complete_chat(request),
             Self::OpenAi(provider) => provider.complete_chat(request),
             Self::AzureOpenAi(provider) => provider.complete_chat(request),
+            Self::Anthropic(provider) => provider.complete_chat(request),
         }
     }
 }
@@ -1919,6 +1993,9 @@ impl SemanticMutationProposalProvider for ResolvedReasoningProvider {
                 .unwrap_or_else(|_| provider.fallback.propose_semantic_mutations(request)),
             Self::AzureOpenAi(provider) => provider
                 .propose_semantic_mutations_via_azure(request)
+                .unwrap_or_else(|_| provider.fallback.propose_semantic_mutations(request)),
+            Self::Anthropic(provider) => provider
+                .propose_semantic_mutations_via_anthropic(request)
                 .unwrap_or_else(|_| provider.fallback.propose_semantic_mutations(request)),
         }
     }
@@ -1999,6 +2076,49 @@ impl ReasoningProvider for AzureOpenAiReasoningProvider {
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, String> {
         self.complete_chat_via_azure(request)
+    }
+}
+
+impl ReasoningProvider for AnthropicReasoningProvider {
+    fn provider_status(&self) -> ReasoningProviderStatus {
+        self.status.clone()
+    }
+
+    fn test_connection(&self) -> Result<ReasoningProviderStatus, String> {
+        let payload = self.request_structured_json(
+            &self.fast_model,
+            "connection_probe",
+            connection_probe_schema(),
+            "Return JSON only. Respond with {\"ok\":true}.",
+            vec![json!({
+                "type": "text",
+                "text": "Confirm that the configured Anthropic reasoning provider is reachable."
+            })],
+        )?;
+        let envelope: ConnectionProbeEnvelope =
+            serde_json::from_value(payload).map_err(|error| error.to_string())?;
+        if envelope.ok {
+            Ok(self.status.clone())
+        } else {
+            Err("Anthropic provider returned an invalid connection probe response.".to_string())
+        }
+    }
+
+    fn summarize_semantic_changes(
+        &self,
+        request: &SemanticSummaryRequest,
+    ) -> SemanticSummaryResponse {
+        match self.summarize_via_anthropic(request) {
+            Ok(response) => response,
+            Err(_) => self.fallback.summarize_semantic_changes(request),
+        }
+    }
+
+    fn complete_chat(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, String> {
+        self.complete_chat_via_anthropic(request)
     }
 }
 
@@ -2152,6 +2272,87 @@ impl AzureOpenAiReasoningProvider {
     }
 }
 
+impl AnthropicReasoningProvider {
+    fn propose_semantic_mutations_via_anthropic(
+        &self,
+        request: &SemanticMutationProposalRequest,
+    ) -> Result<Vec<MutationProposal>, String> {
+        let payload = self.request_structured_json(
+            &self.proposal_model,
+            "semantic_mutation_proposals",
+            semantic_mutation_proposal_schema(),
+            semantic_mutation_proposal_developer_prompt(),
+            anthropic_semantic_mutation_message_blocks(request),
+        )?;
+        parse_semantic_mutation_proposals_payload(payload, request)
+    }
+
+    fn summarize_via_anthropic(
+        &self,
+        request: &SemanticSummaryRequest,
+    ) -> Result<SemanticSummaryResponse, String> {
+        let payload = self.request_structured_json(
+            &self.fast_model,
+            "semantic_change_summary",
+            semantic_summary_schema(),
+            semantic_summary_developer_prompt(),
+            vec![json!({
+                "type": "text",
+                "text": semantic_summary_user_prompt(request)
+            })],
+        )?;
+        let envelope: SemanticSummaryEnvelope =
+            serde_json::from_value(payload).map_err(|error| error.to_string())?;
+        Ok(SemanticSummaryResponse {
+            title: envelope.title.trim().to_string(),
+            body: envelope
+                .body
+                .into_iter()
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect(),
+            provider: self.status.clone(),
+        })
+    }
+
+    fn request_structured_json(
+        &self,
+        model: &str,
+        schema_name: &str,
+        schema: Value,
+        developer_prompt: &str,
+        user_blocks: Vec<Value>,
+    ) -> Result<Value, String> {
+        request_anthropic_structured_json(
+            &self.client,
+            &self.base_url,
+            &self.api_key,
+            model,
+            schema_name,
+            schema,
+            developer_prompt,
+            user_blocks,
+        )
+    }
+
+    fn complete_chat_via_anthropic(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, String> {
+        let message = request_anthropic_text(
+            &self.client,
+            &self.base_url,
+            &self.api_key,
+            &self.fast_model,
+            request,
+        )?;
+        Ok(ChatCompletionResponse {
+            message,
+            provider: self.status.clone(),
+        })
+    }
+}
+
 fn resolve_reasoning_provider_from_env(
     secrets: &ReasoningProviderSecretOverrides,
 ) -> ResolvedReasoningProvider {
@@ -2163,6 +2364,12 @@ fn resolve_reasoning_provider_from_env(
     if requested == "azure_openai" || requested == "azure-openai" {
         if let Some(provider) = azure_openai_provider_from_env(secrets) {
             return ResolvedReasoningProvider::AzureOpenAi(provider);
+        }
+    }
+
+    if requested == "anthropic" || requested == "claude" {
+        if let Some(provider) = anthropic_provider_from_env(secrets) {
+            return ResolvedReasoningProvider::Anthropic(provider);
         }
     }
 
@@ -2349,6 +2556,103 @@ fn azure_openai_provider_from_config(
     })
 }
 
+fn anthropic_provider_from_env(
+    secrets: &ReasoningProviderSecretOverrides,
+) -> Option<AnthropicReasoningProvider> {
+    let api_key = secrets
+        .anthropic_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("ANTHROPIC_API_KEY")
+                .or_else(|_| std::env::var("MERCURIO_ANTHROPIC_API_KEY"))
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })?;
+    let proposal_model = std::env::var("MERCURIO_ANTHROPIC_PROPOSAL_MODEL")
+        .or_else(|_| std::env::var("ANTHROPIC_PROPOSAL_MODEL"))
+        .or_else(|_| std::env::var("MERCURIO_CLAUDE_PROPOSAL_MODEL"))
+        .unwrap_or_else(|_| DEFAULT_ANTHROPIC_PROPOSAL_MODEL.to_string());
+    let fast_model = std::env::var("MERCURIO_ANTHROPIC_FAST_MODEL")
+        .or_else(|_| std::env::var("ANTHROPIC_FAST_MODEL"))
+        .or_else(|_| std::env::var("MERCURIO_CLAUDE_FAST_MODEL"))
+        .unwrap_or_else(|_| DEFAULT_ANTHROPIC_FAST_MODEL.to_string());
+    let base_url = std::env::var("MERCURIO_ANTHROPIC_BASE_URL")
+        .or_else(|_| std::env::var("ANTHROPIC_BASE_URL"))
+        .unwrap_or_else(|_| DEFAULT_ANTHROPIC_BASE_URL.to_string());
+
+    Some(AnthropicReasoningProvider {
+        client: http_client(),
+        api_key,
+        proposal_model: proposal_model.clone(),
+        fast_model: fast_model.clone(),
+        base_url,
+        status: anthropic_status(
+            format!("{proposal_model} / {fast_model}"),
+            "Anthropic Messages API configured from environment.",
+        ),
+        fallback: heuristic_provider(),
+    })
+}
+
+fn anthropic_provider_from_config(
+    config: &ReasoningProviderConfigOverrides,
+    secrets: &ReasoningProviderSecretOverrides,
+) -> Option<AnthropicReasoningProvider> {
+    let api_key = secrets
+        .anthropic_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)?;
+    let proposal_model = config
+        .anthropic_proposal_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_ANTHROPIC_PROPOSAL_MODEL)
+        .to_string();
+    let fast_model = config
+        .anthropic_fast_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_ANTHROPIC_FAST_MODEL)
+        .to_string();
+    let base_url = config
+        .anthropic_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_ANTHROPIC_BASE_URL)
+        .to_string();
+
+    Some(AnthropicReasoningProvider {
+        client: http_client(),
+        api_key,
+        proposal_model: proposal_model.clone(),
+        fast_model: fast_model.clone(),
+        base_url,
+        status: anthropic_status(
+            format!("{proposal_model} / {fast_model}"),
+            "Anthropic Messages API configured from application settings and stored credential.",
+        ),
+        fallback: heuristic_provider(),
+    })
+}
+
+fn anthropic_status(model_label: String, detail: &str) -> ReasoningProviderStatus {
+    ReasoningProviderStatus {
+        kind: ReasoningProviderKind::Anthropic,
+        provider_label: "Anthropic".to_string(),
+        detail: detail.to_string(),
+        structured_outputs: true,
+        model_label: Some(model_label),
+    }
+}
+
 fn http_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
@@ -2461,6 +2765,200 @@ fn request_openai_text(
     extract_output_text(&envelope).map(|value| value.trim().to_string())
 }
 
+fn request_anthropic_structured_json(
+    client: &Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    schema_name: &str,
+    schema: Value,
+    developer_prompt: &str,
+    user_blocks: Vec<Value>,
+) -> Result<Value, String> {
+    let tool_name = format!("emit_{schema_name}");
+    let body = json!({
+        "model": model,
+        "max_tokens": 4096,
+        "system": [
+            {
+                "type": "text",
+                "text": developer_prompt,
+                "cache_control": { "type": "ephemeral" }
+            }
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": user_blocks
+            }
+        ],
+        "tools": [
+            {
+                "name": tool_name,
+                "description": format!("Emit the `{schema_name}` JSON payload exactly matching the supplied input schema."),
+                "input_schema": schema
+            }
+        ],
+        "tool_choice": {
+            "type": "tool",
+            "name": tool_name
+        }
+    });
+
+    let response = client
+        .post(base_url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .json(&body)
+        .send()
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body_text = response.text().map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "Anthropic provider request failed: {status} {body_text}"
+        ));
+    }
+
+    let envelope: AnthropicMessageResponse =
+        serde_json::from_str(&body_text).map_err(|error| error.to_string())?;
+    extract_anthropic_tool_input(&envelope)
+}
+
+fn request_anthropic_text(
+    client: &Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    request: &ChatCompletionRequest,
+) -> Result<String, String> {
+    let system_blocks = anthropic_chat_system_blocks(request);
+    let messages = anthropic_chat_messages(request)?;
+    let body = json!({
+        "model": model,
+        "max_tokens": 4096,
+        "system": system_blocks,
+        "messages": messages,
+    });
+
+    let response = client
+        .post(base_url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .json(&body)
+        .send()
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body_text = response.text().map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "Anthropic provider request failed: {status} {body_text}"
+        ));
+    }
+
+    let envelope: AnthropicMessageResponse =
+        serde_json::from_str(&body_text).map_err(|error| error.to_string())?;
+    extract_anthropic_text(&envelope)
+}
+
+fn anthropic_semantic_mutation_message_blocks(
+    request: &SemanticMutationProposalRequest,
+) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    let stable_context = json!({
+        "capability_context": sysml_semantic_mutation_capability_context(),
+        "semantic_context": request.semantic_context,
+        "cognitive_context": request.cognitive_context,
+    });
+    blocks.push(json!({
+        "type": "text",
+        "text": serde_json::to_string_pretty(&stable_context).unwrap_or_else(|_| "{}".to_string()),
+        "cache_control": { "type": "ephemeral" }
+    }));
+    let dynamic_request = json!({
+        "agent_guidance": semantic_mutation_agent_guidance(),
+        "request": {
+            "design_intent": request.design_intent,
+            "workspace_revision": request.workspace_revision,
+            "focus": request.focus,
+            "task_goal_guidance": request.task_goal_guidance,
+            "quality_goal_guidance": request.quality_goal_guidance,
+            "reasoning_tool_results": request.reasoning_tool_results,
+        }
+    });
+    blocks.push(json!({
+        "type": "text",
+        "text": serde_json::to_string_pretty(&dynamic_request).unwrap_or_else(|_| "{}".to_string())
+    }));
+    blocks
+}
+
+fn anthropic_chat_system_blocks(request: &ChatCompletionRequest) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    if !request.context.is_empty() {
+        blocks.push(json!({
+            "type": "text",
+            "text": format!(
+                "Use this Mercurio model context as the authoritative current workspace state.\n\
+                 Critical grounding rules:\n\
+                 - Treat live editor/workspace snapshots as newer and more authoritative than chat history, compiled metadata, or prior assistant messages.\n\
+                 - Do not claim a file, package, requirement, element, relationship, diagram, commit, or edit exists unless it appears in the supplied current workspace context or validated tool output.\n\
+                 - If prior chat says something was created but the current workspace snapshot does not contain it, say it is not present in the current model.\n\
+                 - If context includes `Metamodel lookup result:` lines, treat them as authoritative KIR evidence and do not substitute generic SysML, UML, or modeling-language knowledge.\n\
+                 - For questions asking what is in the current model, summarize only elements present in the current workspace context and state when expected evidence is missing.\n\n{}",
+                request.context.join("\n")
+            ),
+            "cache_control": { "type": "ephemeral" }
+        }));
+    }
+    blocks
+}
+
+fn anthropic_chat_messages(request: &ChatCompletionRequest) -> Result<Vec<Value>, String> {
+    let mut messages = Vec::new();
+    for message in &request.messages {
+        match message.role {
+            ChatMessageRole::Developer => {
+                messages.push(json!({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": format!("Developer instruction:\n{}", message.content)
+                        }
+                    ]
+                }));
+            }
+            ChatMessageRole::Assistant => {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": message.content
+                        }
+                    ]
+                }));
+            }
+            ChatMessageRole::User => {
+                messages.push(json!({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": message.content
+                        }
+                    ]
+                }));
+            }
+        }
+    }
+    if messages.is_empty() {
+        return Err("Chat request must include at least one message.".to_string());
+    }
+    Ok(messages)
+}
+
 fn chat_role_name(role: &ChatMessageRole) -> &'static str {
     match role {
         ChatMessageRole::Developer => "developer",
@@ -2539,6 +3037,21 @@ fn configured_provider_missing_message(
             }
             format!(
                 "OpenAI settings are incomplete. Missing {}.",
+                missing.join(", ")
+            )
+        }
+        ReasoningProviderKind::Anthropic => {
+            if secrets
+                .anthropic_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                missing.push("stored API key");
+            }
+            format!(
+                "Anthropic settings are incomplete. Missing {}.",
                 missing.join(", ")
             )
         }
@@ -3297,19 +3810,23 @@ fn semantic_mutation_proposal_developer_prompt() -> &'static str {
 fn semantic_mutation_proposal_user_prompt(request: &SemanticMutationProposalRequest) -> String {
     serde_json::to_string_pretty(&json!({
         "capability_context": sysml_semantic_mutation_capability_context(),
-        "agent_guidance": {
-            "element_ref_format": "Use dot-qualified names such as HybridVehicle.Vehicle, never HybridVehicle::Vehicle.",
-            "current_state_rule": "Treat cognitive_context.elements and semantic_context.elements as already existing. Do not re-add them.",
-            "grounding_rule": "Use cognitive_context as authoritative structured context. Prefer KIR element_id for evidence identity, and use qualified_name only as ElementRef display/input metadata.",
-            "citation_rule": "When reasoning_tool_results or cognitive_context.diagnostics identify a relevant finding, cite its id and related element in proposal evidence.",
-            "operation_rule": "Every proposal must contain at least one operation. Empty proposals are ignored.",
-            "quality_rule": "When a requirement already exists without id or text, prefer SetAttribute operations for id and text before adding more requirements.",
-            "batching_rule": "Batch related operations only when their containers and referenced types already exist in the current semantic context.",
-            "affordance_rule": "Prefer operations supported by semantic_context.affordances for the target element."
-        },
+        "agent_guidance": semantic_mutation_agent_guidance(),
         "request": request,
     }))
     .unwrap_or_else(|_| "{}".to_string())
+}
+
+fn semantic_mutation_agent_guidance() -> Value {
+    json!({
+        "element_ref_format": "Use dot-qualified names such as HybridVehicle.Vehicle, never HybridVehicle::Vehicle.",
+        "current_state_rule": "Treat cognitive_context.elements and semantic_context.elements as already existing. Do not re-add them.",
+        "grounding_rule": "Use cognitive_context as authoritative structured context. Prefer KIR element_id for evidence identity, and use qualified_name only as ElementRef display/input metadata.",
+        "citation_rule": "When reasoning_tool_results or cognitive_context.diagnostics identify a relevant finding, cite its id and related element in proposal evidence.",
+        "operation_rule": "Every proposal must contain at least one operation. Empty proposals are ignored.",
+        "quality_rule": "When a requirement already exists without id or text, prefer SetAttribute operations for id and text before adding more requirements.",
+        "batching_rule": "Batch related operations only when their containers and referenced types already exist in the current semantic context.",
+        "affordance_rule": "Prefer operations supported by semantic_context.affordances for the target element."
+    })
 }
 
 fn parse_semantic_mutation_proposals_payload(
@@ -3342,6 +3859,35 @@ fn extract_output_text(response: &OpenAiStructuredResponse) -> Result<String, St
     }
 
     Err("no output_text item found in AI provider response".to_string())
+}
+
+fn extract_anthropic_tool_input(response: &AnthropicMessageResponse) -> Result<Value, String> {
+    response
+        .content
+        .iter()
+        .find_map(|content| match content {
+            AnthropicContentItem::ToolUse { input } => Some(input.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| "no tool_use item found in Anthropic provider response".to_string())
+}
+
+fn extract_anthropic_text(response: &AnthropicMessageResponse) -> Result<String, String> {
+    let text = response
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            AnthropicContentItem::Text { text } => Some(text.trim()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        Err("no text item found in Anthropic provider response".to_string())
+    } else {
+        Ok(text)
+    }
 }
 
 fn semantic_summary_schema() -> Value {
@@ -3733,15 +4279,17 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CheckedMutationProposal, MutationProposal, OpenAiStructuredResponse,
-        ReasoningProviderConfigOverrides, ReasoningProviderSecretOverrides, SemanticChangeItem,
-        SemanticChangeKind, SemanticContextBuilder, SemanticMutationProposalProvider,
-        SemanticMutationProposalRequest, SemanticSummaryRequest, ask_mercurio_artifacts,
-        classify_ask_mercurio_task, extract_output_text, heuristic_provider,
-        normalize_azure_openai_base_url, parse_semantic_mutation_proposals_payload,
-        propose_checked_semantic_mutations, run_semantic_mutation_agent,
-        semantic_mutation_proposal_schema, semantic_mutation_proposal_user_prompt,
-        summarize_semantic_changes, test_configured_reasoning_provider_connection,
+        AnthropicMessageResponse, CheckedMutationProposal, MutationProposal,
+        OpenAiStructuredResponse, ReasoningProviderConfigOverrides,
+        ReasoningProviderSecretOverrides, SemanticChangeItem, SemanticChangeKind,
+        SemanticContextBuilder, SemanticMutationProposalProvider, SemanticMutationProposalRequest,
+        SemanticSummaryRequest, ask_mercurio_artifacts, classify_ask_mercurio_task,
+        configured_reasoning_provider, extract_anthropic_tool_input, extract_output_text,
+        heuristic_provider, normalize_azure_openai_base_url,
+        parse_semantic_mutation_proposals_payload, propose_checked_semantic_mutations,
+        run_semantic_mutation_agent, semantic_mutation_proposal_schema,
+        semantic_mutation_proposal_user_prompt, summarize_semantic_changes,
+        test_configured_reasoning_provider_connection,
     };
     use crate::{
         AskMercurioArtifact, AskMercurioTask, ElementRef, ReasoningProvider, ReasoningProviderKind,
@@ -4630,6 +5178,29 @@ package HybridVehicle {
     }
 
     #[test]
+    fn configured_anthropic_provider_uses_separate_models() {
+        let provider = configured_reasoning_provider(
+            ReasoningProviderConfigOverrides {
+                provider: Some(ReasoningProviderKind::Anthropic),
+                anthropic_proposal_model: Some("claude-opus-4-8".to_string()),
+                anthropic_fast_model: Some("claude-sonnet-4-6".to_string()),
+                ..ReasoningProviderConfigOverrides::default()
+            },
+            ReasoningProviderSecretOverrides {
+                anthropic_api_key: Some("test-key".to_string()),
+                ..ReasoningProviderSecretOverrides::default()
+            },
+        );
+
+        let status = provider.provider_status();
+        assert_eq!(status.kind, ReasoningProviderKind::Anthropic);
+        assert_eq!(
+            status.model_label.as_deref(),
+            Some("claude-opus-4-8 / claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
     fn extract_output_text_reads_structured_response() {
         let response: OpenAiStructuredResponse = serde_json::from_value(json!({
             "output": [
@@ -4647,6 +5218,26 @@ package HybridVehicle {
 
         let output = extract_output_text(&response).unwrap();
         assert!(output.contains("\"title\""));
+    }
+
+    #[test]
+    fn extract_anthropic_tool_input_reads_structured_response() {
+        let response: AnthropicMessageResponse = serde_json::from_value(json!({
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_test",
+                    "name": "emit_connection_probe",
+                    "input": { "ok": true }
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            extract_anthropic_tool_input(&response).unwrap(),
+            json!({ "ok": true })
+        );
     }
 
     #[test]
