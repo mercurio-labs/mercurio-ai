@@ -133,6 +133,17 @@ pub struct ChatCompletionRequest {
 pub struct ChatCompletionResponse {
     pub message: String,
     pub provider: ReasoningProviderStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ChatCompletionArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChatCompletionArtifact {
+    Diagram { spec: Value },
+    Matrix { spec: Value },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2190,10 +2201,7 @@ impl OpenAiReasoningProvider {
             &self.model,
             request,
         )?;
-        Ok(ChatCompletionResponse {
-            message,
-            provider: self.status.clone(),
-        })
+        Ok(chat_completion_response(message, self.status.clone()))
     }
 }
 
@@ -2265,10 +2273,7 @@ impl AzureOpenAiReasoningProvider {
             &self.deployment,
             request,
         )?;
-        Ok(ChatCompletionResponse {
-            message,
-            provider: self.status.clone(),
-        })
+        Ok(chat_completion_response(message, self.status.clone()))
     }
 }
 
@@ -2346,10 +2351,7 @@ impl AnthropicReasoningProvider {
             &self.fast_model,
             request,
         )?;
-        Ok(ChatCompletionResponse {
-            message,
-            provider: self.status.clone(),
-        })
+        Ok(chat_completion_response(message, self.status.clone()))
     }
 }
 
@@ -2718,21 +2720,10 @@ fn request_openai_text(
     request: &ChatCompletionRequest,
 ) -> Result<String, String> {
     let mut input = Vec::new();
-    if !request.context.is_empty() {
-        input.push(json!({
-            "role": "developer",
-            "content": format!(
-                "Use this Mercurio model context as the authoritative current workspace state.\n\
-                 Critical grounding rules:\n\
-                 - Treat live editor/workspace snapshots as newer and more authoritative than chat history, compiled metadata, or prior assistant messages.\n\
-                 - Do not claim a file, package, requirement, element, relationship, diagram, commit, or edit exists unless it appears in the supplied current workspace context or validated tool output.\n\
-                 - If prior chat says something was created but the current workspace snapshot does not contain it, say it is not present in the current model.\n\
-                 - If context includes `Metamodel lookup result:` lines, treat them as authoritative KIR evidence and do not substitute generic SysML, UML, or modeling-language knowledge.\n\
-                 - For questions asking what is in the current model, summarize only elements present in the current workspace context and state when expected evidence is missing.\n\n{}",
-                request.context.join("\n")
-            ),
-        }));
-    }
+    input.push(json!({
+        "role": "developer",
+        "content": chat_developer_prompt(request),
+    }));
     input.extend(request.messages.iter().map(|message| {
         json!({
             "role": chat_role_name(&message.role),
@@ -2894,24 +2885,11 @@ fn anthropic_semantic_mutation_message_blocks(
 }
 
 fn anthropic_chat_system_blocks(request: &ChatCompletionRequest) -> Vec<Value> {
-    let mut blocks = Vec::new();
-    if !request.context.is_empty() {
-        blocks.push(json!({
-            "type": "text",
-            "text": format!(
-                "Use this Mercurio model context as the authoritative current workspace state.\n\
-                 Critical grounding rules:\n\
-                 - Treat live editor/workspace snapshots as newer and more authoritative than chat history, compiled metadata, or prior assistant messages.\n\
-                 - Do not claim a file, package, requirement, element, relationship, diagram, commit, or edit exists unless it appears in the supplied current workspace context or validated tool output.\n\
-                 - If prior chat says something was created but the current workspace snapshot does not contain it, say it is not present in the current model.\n\
-                 - If context includes `Metamodel lookup result:` lines, treat them as authoritative KIR evidence and do not substitute generic SysML, UML, or modeling-language knowledge.\n\
-                 - For questions asking what is in the current model, summarize only elements present in the current workspace context and state when expected evidence is missing.\n\n{}",
-                request.context.join("\n")
-            ),
-            "cache_control": { "type": "ephemeral" }
-        }));
-    }
-    blocks
+    vec![json!({
+        "type": "text",
+        "text": chat_developer_prompt(request),
+        "cache_control": { "type": "ephemeral" }
+    })]
 }
 
 fn anthropic_chat_messages(request: &ChatCompletionRequest) -> Result<Vec<Value>, String> {
@@ -3433,6 +3411,220 @@ fn default_semantic_agent_goal_spec(goal: &str) -> Option<SemanticGoalSpec> {
     })
 }
 
+fn chat_developer_prompt(request: &ChatCompletionRequest) -> String {
+    let context = if request.context.is_empty() {
+        "No current workspace context was supplied.".to_string()
+    } else {
+        request.context.join("\n")
+    };
+
+    format!(
+        "Use this Mercurio model context as the authoritative current workspace state.\n\
+         Critical grounding rules:\n\
+         - Treat live editor/workspace snapshots as newer and more authoritative than chat history, compiled metadata, or prior assistant messages.\n\
+         - Do not claim a file, package, requirement, element, relationship, diagram, commit, or edit exists unless it appears in the supplied current workspace context or validated tool output.\n\
+         - If prior chat says something was created but the current workspace snapshot does not contain it, say it is not present in the current model.\n\
+         - If context includes `Metamodel lookup result:` lines, treat them as authoritative KIR evidence and do not substitute generic SysML, UML, or modeling-language knowledge.\n\
+         - For questions asking what is in the current model, summarize only elements present in the current workspace context and state when expected evidence is missing.\n\n\
+         Artifact contract:\n\
+         - When the user asks for a diagram, include a fenced ```diagram block containing only JSON after any prose summary. The server will lift this block into a typed artifact before returning it to the UI.\n\
+         - Diagram JSON must include version: 1, kind, lensId, title, root, and optional query/layout/style fields. Choose lensId from: type-hierarchy, decomposition, neighborhood, coverage, composition, references, dependencies, package-tree, impact, validation. For specialization path requests use type-hierarchy with include_libraries true and include_user_model false. Always set both kind and lensId.\n\
+         - When the user asks for a matrix or table view, include a fenced ```matrix block containing only JSON after any prose summary. Matrix JSON must include version: 1, title, rows, columns, and cells, where each cell has row, column, value, and optional elementId.\n\
+         - To highlight or annotate elements in the currently open diagram view, include a fenced ```view_action block after your prose with JSON shaped like {{ \"highlight\": [\"element-name-or-id\"], \"annotate\": {{ \"element-name\": \"short explanation\" }}, \"dim_others\": true }}. Each view_action block replaces the previous overlay. Omit the block when no overlay change is needed.\n\n\
+         Current workspace context:\n{}",
+        context
+    )
+}
+
+fn chat_completion_response(
+    raw_message: String,
+    provider: ReasoningProviderStatus,
+) -> ChatCompletionResponse {
+    let (message, artifacts, overlay) = extract_chat_completion_artifacts(&raw_message);
+    ChatCompletionResponse {
+        message,
+        provider,
+        artifacts,
+        overlay,
+    }
+}
+
+fn extract_chat_completion_artifacts(
+    raw_message: &str,
+) -> (String, Vec<ChatCompletionArtifact>, Option<Value>) {
+    let mut visible = String::new();
+    let mut artifacts = Vec::new();
+    let mut overlay = None;
+    let mut rest = raw_message;
+
+    while let Some(fence_start) = rest.find("```") {
+        visible.push_str(&rest[..fence_start]);
+        let after_open = &rest[fence_start + 3..];
+        let Some(line_end) = after_open.find('\n') else {
+            visible.push_str(&rest[fence_start..]);
+            rest = "";
+            break;
+        };
+        let info = after_open[..line_end].trim();
+        let content_start = line_end + 1;
+        let after_info = &after_open[content_start..];
+        let Some(fence_end) = after_info.find("```") else {
+            visible.push_str(&rest[fence_start..]);
+            rest = "";
+            break;
+        };
+        let content = &after_info[..fence_end];
+        let consumed = fence_start + 3 + content_start + fence_end + 3;
+        let captured = if info.split_whitespace().any(|part| part.eq_ignore_ascii_case("diagram")) {
+            if let Some(spec) = serde_json::from_str::<Value>(content.trim())
+                .ok()
+                .and_then(validate_chat_diagram_spec)
+            {
+                artifacts.push(ChatCompletionArtifact::Diagram { spec });
+                true
+            } else {
+                false
+            }
+        } else if info.split_whitespace().any(|part| part.eq_ignore_ascii_case("matrix")) {
+            if let Some(spec) = serde_json::from_str::<Value>(content.trim())
+                .ok()
+                .and_then(validate_chat_matrix_spec)
+            {
+                artifacts.push(ChatCompletionArtifact::Matrix { spec });
+                true
+            } else {
+                false
+            }
+        } else if info
+            .split_whitespace()
+            .any(|part| part.eq_ignore_ascii_case("view_action"))
+        {
+            if let Some(value) = serde_json::from_str::<Value>(content.trim())
+                .ok()
+                .and_then(normalize_chat_view_overlay)
+            {
+                overlay = Some(value);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !captured {
+            visible.push_str(&rest[fence_start..consumed]);
+        }
+        rest = &rest[consumed..];
+    }
+
+    visible.push_str(rest);
+    (collapse_chat_blank_lines(visible.trim()), artifacts, overlay)
+}
+
+fn validate_chat_diagram_spec(value: Value) -> Option<Value> {
+    let object = value.as_object()?;
+    if object.get("version").and_then(Value::as_i64) != Some(1) {
+        return None;
+    }
+    if object.get("kind").and_then(Value::as_str)?.trim().is_empty() {
+        return None;
+    }
+    if object
+        .get("title")
+        .and_then(Value::as_str)?
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+    Some(Value::Object(object.clone()))
+}
+
+fn validate_chat_matrix_spec(value: Value) -> Option<Value> {
+    let object = value.as_object()?;
+    if object.get("version").and_then(Value::as_i64) != Some(1) {
+        return None;
+    }
+    if object
+        .get("title")
+        .and_then(Value::as_str)?
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+    if !object.get("rows").is_some_and(Value::is_array)
+        || !object.get("columns").is_some_and(Value::is_array)
+        || !object.get("cells").is_some_and(Value::is_array)
+    {
+        return None;
+    }
+    Some(Value::Object(object.clone()))
+}
+
+fn normalize_chat_view_overlay(value: Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let mut normalized = serde_json::Map::new();
+
+    if let Some(highlight) = object.get("highlight") {
+        let values = highlight
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| Value::String(value.to_string()))
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            normalized.insert("highlightedNodeIds".to_string(), Value::Array(values));
+        }
+    }
+
+    if let Some(annotate) = object.get("annotate") {
+        let entries = annotate
+            .as_object()?
+            .iter()
+            .filter_map(|(key, value)| {
+                let label = value.as_str()?.trim();
+                if key.trim().is_empty() || label.is_empty() {
+                    return None;
+                }
+                Some((key.clone(), Value::String(label.to_string())))
+            })
+            .collect::<serde_json::Map<_, _>>();
+        if !entries.is_empty() {
+            normalized.insert("annotationsByNodeId".to_string(), Value::Object(entries));
+        }
+    }
+
+    if let Some(dim_others) = object.get("dim_others").and_then(Value::as_bool) {
+        normalized.insert("dimUnhighlighted".to_string(), Value::Bool(dim_others));
+    }
+
+    Some(Value::Object(normalized))
+}
+
+fn collapse_chat_blank_lines(input: &str) -> String {
+    let mut output = String::new();
+    let mut blank_count = 0usize;
+    for line in input.lines() {
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 1 {
+                output.push('\n');
+            }
+            continue;
+        }
+        blank_count = 0;
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(line.trim_end());
+    }
+    output.trim().to_string()
+}
+
 fn heuristic_chat_completion(
     request: &ChatCompletionRequest,
     provider: ReasoningProviderStatus,
@@ -3450,12 +3642,12 @@ fn heuristic_chat_completion(
     } else {
         format!("I received {} context item(s).", request.context.len())
     };
-    ChatCompletionResponse {
-        message: format!(
+    chat_completion_response(
+        format!(
             "I received \"{latest}\". {context} Configure OpenAI or Azure OpenAI in Settings to generate provider-backed answers."
         ),
         provider,
-    }
+    )
 }
 
 pub fn classify_ask_mercurio_task(prompt: &str) -> AskMercurioTask {
