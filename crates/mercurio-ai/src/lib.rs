@@ -700,6 +700,29 @@ package HybridVehicle {
     }
 
     #[test]
+    fn heuristic_provider_proposes_requirements_package_from_empty_model() {
+        let provider = heuristic_provider();
+        let proposals = provider.propose_semantic_mutations(&SemanticMutationProposalRequest {
+            design_intent: "add a requirements package with 10 requirements".to_string(),
+            workspace_revision: WorkspaceRevision {
+                fingerprint: "test-revision".to_string(),
+            },
+            focus: Vec::new(),
+            task_goal_guidance: None,
+            quality_goal_guidance: None,
+            semantic_context: None,
+            cognitive_context: None,
+            reasoning_tool_results: Vec::new(),
+        });
+
+        assert_eq!(proposals.len(), 1);
+        assert!(matches!(
+            proposals[0].operations.as_slice(),
+            [SemanticMutation::AddPackage { name, .. }] if name == "Requirements"
+        ));
+    }
+
+    #[test]
     fn semantic_mutation_proposal_schema_accepts_supported_operations() {
         let schema = semantic_mutation_proposal_schema();
         assert_eq!(schema["type"], "object");
@@ -1009,6 +1032,42 @@ package HybridVehicle {
         assert!(rendered.contains("requirement def ImproveEfficiency"));
         assert!(rendered.contains("part def RegenerativeBrakingSystem"));
         assert!(rendered.contains("satisfy requirement ImproveEfficiency"));
+    }
+
+    #[test]
+    fn semantic_agent_adds_requirements_package_with_ten_requirements() {
+        let provider = heuristic_provider();
+
+        let run = run_semantic_mutation_agent(
+            &provider,
+            SemanticAgentRunRequest {
+                goal: "add a requirements package with 10 requirements".to_string(),
+                goal_spec: None,
+                quality_goal: Some(default_model_quality_profile().goal),
+                minimum_quality_score: Some(1.0),
+                initial_files: BTreeMap::new(),
+                focus: Vec::new(),
+                max_steps: 3,
+                reasoning_tools: Vec::new(),
+                tool_mode: crate::SemanticAgentToolMode::Off,
+            },
+        );
+
+        assert_eq!(run.status, SemanticAgentRunStatus::Completed, "{run:#?}");
+        assert_eq!(run.stop_reason, "goal and quality satisfied");
+        let rendered = run
+            .final_files
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("package Requirements"));
+        assert_eq!(rendered.matches("requirement def ").count(), 10);
+        assert!(rendered.contains("requirement def FunctionalPerformance"));
+        assert!(rendered.contains("doc /* id: REQ-001 */"));
+        assert!(rendered.contains("doc /* The system shall deliver its primary function"));
+        assert!(rendered.contains("requirement def VerificationEvidence"));
+        assert!(rendered.contains("doc /* id: REQ-010 */"));
     }
 
     #[test]

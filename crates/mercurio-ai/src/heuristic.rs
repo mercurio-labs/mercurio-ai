@@ -5,6 +5,8 @@ use crate::{
     SemanticSummaryResponse, chat_completion_response,
 };
 
+const DEFAULT_REQUIREMENT_COUNT: usize = 10;
+
 pub(crate) fn heuristic_semantic_summary(
     request: &SemanticSummaryRequest,
     provider: ReasoningProviderStatus,
@@ -71,6 +73,10 @@ pub(crate) fn heuristic_semantic_mutation_proposals(
     request: &SemanticMutationProposalRequest,
 ) -> Vec<MutationProposal> {
     let intent = request.design_intent.to_ascii_lowercase();
+    if is_requirements_package_request(&intent) {
+        return heuristic_requirements_package_proposals(request);
+    }
+
     if !(intent.contains("hybrid") || intent.contains("efficiency")) {
         return Vec::new();
     }
@@ -209,6 +215,144 @@ pub(crate) fn heuristic_semantic_mutation_proposals(
     }
 
     vec![heuristic_regenerative_braking_proposal(request)]
+}
+
+fn is_requirements_package_request(intent: &str) -> bool {
+    intent.contains("requirement")
+        && intent.contains("package")
+        && (intent.contains("10") || intent.contains("ten"))
+}
+
+fn heuristic_requirements_package_proposals(
+    request: &SemanticMutationProposalRequest,
+) -> Vec<MutationProposal> {
+    if !request_context_has_element(request, "Requirements") {
+        return vec![MutationProposal {
+            intent: "Create requirements package".to_string(),
+            affected_elements: vec![ElementRef::new("Requirements")],
+            operations: vec![SemanticMutation::AddPackage {
+                target_file: "requirements.sysml".to_string(),
+                name: "Requirements".to_string(),
+            }],
+            evidence: vec![MutationEvidence {
+                element: None,
+                summary: "The request asks for a dedicated requirements package.".to_string(),
+            }],
+            rationale: Some(
+                "A package provides the namespace that can own the requested requirements."
+                    .to_string(),
+            ),
+            workspace_revision: request.workspace_revision.clone(),
+        }];
+    }
+
+    let missing = default_requirement_specs()
+        .into_iter()
+        .filter(|spec| {
+            !request_context_has_element(request, &format!("Requirements.{}", spec.name))
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Vec::new();
+    }
+
+    let mut operations = Vec::new();
+    for spec in missing {
+        let element = ElementRef::new(format!("Requirements.{}", spec.name));
+        operations.push(SemanticMutation::AddDefinition {
+            container: ElementRef::new("Requirements"),
+            keyword: "requirement".to_string(),
+            name: spec.name.to_string(),
+            specializes: Vec::new(),
+        });
+        operations.push(SemanticMutation::SetAttribute {
+            element: element.clone(),
+            attribute: "id".to_string(),
+            value: serde_json::Value::String(spec.id.to_string()),
+        });
+        operations.push(SemanticMutation::SetAttribute {
+            element,
+            attribute: "text".to_string(),
+            value: serde_json::Value::String(spec.text.to_string()),
+        });
+    }
+
+    vec![MutationProposal {
+        intent: format!("Add {DEFAULT_REQUIREMENT_COUNT} requirement definitions"),
+        affected_elements: vec![ElementRef::new("Requirements")],
+        operations,
+        evidence: vec![MutationEvidence {
+            element: Some(ElementRef::new("Requirements")),
+            summary: "The package exists and can own requirement definitions.".to_string(),
+        }],
+        rationale: Some(
+            "Each requirement is created as a SysML requirement definition and given explicit id and text attributes."
+                .to_string(),
+        ),
+        workspace_revision: request.workspace_revision.clone(),
+    }]
+}
+
+#[derive(Clone, Copy)]
+struct RequirementSpec {
+    name: &'static str,
+    id: &'static str,
+    text: &'static str,
+}
+
+fn default_requirement_specs() -> [RequirementSpec; DEFAULT_REQUIREMENT_COUNT] {
+    [
+        RequirementSpec {
+            name: "FunctionalPerformance",
+            id: "REQ-001",
+            text: "The system shall deliver its primary function under nominal operating conditions.",
+        },
+        RequirementSpec {
+            name: "UserSafety",
+            id: "REQ-002",
+            text: "The system shall protect users from hazardous operating states.",
+        },
+        RequirementSpec {
+            name: "FaultDetection",
+            id: "REQ-003",
+            text: "The system shall detect and report critical faults.",
+        },
+        RequirementSpec {
+            name: "RecoveryBehavior",
+            id: "REQ-004",
+            text: "The system shall enter a controlled recovery mode after a critical fault.",
+        },
+        RequirementSpec {
+            name: "DataIntegrity",
+            id: "REQ-005",
+            text: "The system shall preserve integrity of operational data across transactions.",
+        },
+        RequirementSpec {
+            name: "Availability",
+            id: "REQ-006",
+            text: "The system shall remain available during planned operating periods.",
+        },
+        RequirementSpec {
+            name: "Maintainability",
+            id: "REQ-007",
+            text: "The system shall support diagnostic maintenance without replacing unrelated components.",
+        },
+        RequirementSpec {
+            name: "Interoperability",
+            id: "REQ-008",
+            text: "The system shall exchange required data with external interfaces using documented contracts.",
+        },
+        RequirementSpec {
+            name: "EnvironmentalTolerance",
+            id: "REQ-009",
+            text: "The system shall operate within the specified environmental envelope.",
+        },
+        RequirementSpec {
+            name: "VerificationEvidence",
+            id: "REQ-010",
+            text: "The system shall maintain verification evidence for each allocated requirement.",
+        },
+    ]
 }
 
 fn heuristic_regenerative_braking_proposal(

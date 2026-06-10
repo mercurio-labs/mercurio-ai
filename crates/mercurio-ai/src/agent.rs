@@ -703,6 +703,39 @@ fn severity_label(severity: &FindingSeverity) -> &'static str {
 
 fn default_semantic_agent_goal_spec(goal: &str) -> Option<SemanticGoalSpec> {
     let goal = goal.to_ascii_lowercase();
+    if goal.contains("requirement")
+        && goal.contains("package")
+        && (goal.contains("10") || goal.contains("ten"))
+    {
+        let mut checks = vec![SemanticGoalCheck::ElementExists {
+            element: ElementRef::new("Requirements"),
+            kind: Some("package".to_string()),
+        }];
+        let requirement_names = [
+            "FunctionalPerformance",
+            "UserSafety",
+            "FaultDetection",
+            "RecoveryBehavior",
+            "DataIntegrity",
+            "Availability",
+            "Maintainability",
+            "Interoperability",
+            "EnvironmentalTolerance",
+            "VerificationEvidence",
+        ];
+        checks.extend(requirement_names.into_iter().map(|name| {
+            SemanticGoalCheck::NamedElementExists {
+                name: name.to_string(),
+                kind: Some("requirement".to_string()),
+            }
+        }));
+
+        return Some(SemanticGoalSpec {
+            policy: mercurio_core::GoalPolicy::All,
+            checks,
+        });
+    }
+
     if !(goal.contains("hybrid") || goal.contains("efficiency")) {
         return None;
     }
