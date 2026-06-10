@@ -13,7 +13,7 @@ use mercurio_reasoner_api::{
     FindingSeverity, ReasoningReport, SemanticArtifactRef, SemanticContextKind, SemanticContextRef,
 };
 use mercurio_reference_capabilities::{
-    analyze_requirement_coverage, analyze_semantic_impact, analyze_state_machine_simulation,
+    analyze_requirement_coverage, analyze_semantic_impact, analyze_state_machine_analysis,
 };
 use mercurio_requirements::{evaluate_semantic_goal, explain_semantic_goal};
 use mercurio_sysml::{
@@ -407,7 +407,7 @@ fn run_semantic_agent_tools(
                     analyze_semantic_impact(&runtime, context.clone(), request_id)
                 }
                 SemanticAgentToolKind::StateSimulation => {
-                    analyze_state_machine_simulation(&runtime, context.clone(), request_id)
+                    analyze_state_machine_analysis(&runtime, context.clone(), request_id)
                 }
                 SemanticAgentToolKind::ModelInspection => {
                     return run_model_inspection_tool(tool, files, goal, step_index);
@@ -517,6 +517,7 @@ fn agent_tool_context(workspace_revision: &WorkspaceRevision) -> SemanticContext
             kir_schema_version: "mercurio.kir.v1".to_string(),
             source_authority: Some("semantic_agent".to_string()),
             source_revision: Some(workspace_revision.fingerprint.clone()),
+            kir_content_hash: None,
         },
     }
 }

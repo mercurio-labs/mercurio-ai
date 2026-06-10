@@ -57,7 +57,7 @@ pub use workbench::run_configured_workbench_interaction;
 pub use mercurio_core::{
     CognitiveContext, CognitiveDiagnostic, CognitiveDiagnosticSeverity, CognitiveElement,
     CognitiveFocus, CognitiveRelationship, CoreMutationFeasibilityService, DesignIntent, Edge,
-    Element, ElementRef, FeasibilityStatus, GoalEvaluation, Graph, KirDocument,
+    Element, ElementRef, FeasibilityStatus, GoalEvaluation, GoalPolicy, Graph, KirDocument,
     MutationApplicationResult, MutationContext, MutationEvidence, MutationFeasibilityReport,
     MutationFeasibilityService, MutationProposal, NodeId, SemanticArtifact, SemanticElementRef,
     SemanticExpression, SemanticGoalCheck, SemanticGoalExplanation, SemanticGoalSpec,

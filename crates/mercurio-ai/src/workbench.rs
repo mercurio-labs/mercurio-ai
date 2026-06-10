@@ -42,24 +42,7 @@ pub fn run_configured_workbench_interaction(
                 .unwrap_or_else(|| latest_user_content(&request.messages).to_string());
             let run = run_semantic_mutation_agent(
                 &provider,
-                SemanticAgentRunRequest {
-                    goal: goal.clone(),
-                    goal_spec: request
-                        .intent
-                        .as_ref()
-                        .map(design_intent_to_semantic_goal_spec),
-                    quality_goal: Some(default_model_quality_profile().goal),
-                    minimum_quality_score: Some(0.5),
-                    initial_files: files,
-                    focus: request.focus.clone(),
-                    max_steps: 6,
-                    reasoning_tools: vec![
-                        SemanticAgentToolKind::RequirementCoverage,
-                        SemanticAgentToolKind::SemanticImpact,
-                        SemanticAgentToolKind::ModelInspection,
-                    ],
-                    tool_mode: SemanticAgentToolMode::Auto,
-                },
+                exploration_agent_request(request, goal.clone(), files),
             );
             let message = format!(
                 "Semantic exploration {}: {}. Steps: {}.",
@@ -120,6 +103,31 @@ pub fn run_configured_workbench_interaction(
     complete_configured_chat(config, secrets, &chat_request).map(AiWorkbenchResponse::from)
 }
 
+fn exploration_agent_request(
+    request: &AiWorkbenchRequest,
+    goal: String,
+    initial_files: BTreeMap<String, String>,
+) -> SemanticAgentRunRequest {
+    SemanticAgentRunRequest {
+        goal,
+        goal_spec: request
+            .intent
+            .as_ref()
+            .map(design_intent_to_semantic_goal_spec),
+        quality_goal: Some(default_model_quality_profile().goal),
+        minimum_quality_score: Some(0.5),
+        initial_files,
+        focus: request.focus.clone(),
+        max_steps: 6,
+        reasoning_tools: vec![
+            SemanticAgentToolKind::RequirementCoverage,
+            SemanticAgentToolKind::SemanticImpact,
+            SemanticAgentToolKind::ModelInspection,
+        ],
+        tool_mode: SemanticAgentToolMode::Auto,
+    }
+}
+
 fn ai_workspace_input_context_lines(workspace: &AiWorkspaceInput) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(root) = workspace
@@ -162,4 +170,49 @@ fn ai_workspace_input_context_lines(workspace: &AiWorkspaceInput) -> Vec<String>
         ));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AiWorkbenchMode, DesignIntent, ElementRef, GoalPolicy, SemanticGoalCheck};
+
+    #[test]
+    fn workbench_exploration_maps_design_intent_to_semantic_goal_spec() {
+        let focus = ElementRef {
+            qualified_name: "Vehicle.powertrain".to_string(),
+        };
+        let request = AiWorkbenchRequest {
+            mode: AiWorkbenchMode::Exploration,
+            messages: Vec::new(),
+            intent: Some(DesignIntent {
+                summary: "Improve hybrid vehicle efficiency".to_string(),
+                goals: vec!["reduce energy use".to_string()],
+                constraints: vec!["preserve safety requirements".to_string()],
+                assumptions: vec!["Urban drive cycle".to_string()],
+                metadata: BTreeMap::new(),
+            }),
+            focus: vec![focus],
+            workspace: None,
+            cognitive_context: None,
+        };
+        let agent_request = exploration_agent_request(
+            &request,
+            "Improve hybrid vehicle efficiency".to_string(),
+            BTreeMap::new(),
+        );
+        let goal_spec = agent_request
+            .goal_spec
+            .expect("workbench intent should produce semantic goal spec");
+
+        assert_eq!(goal_spec.policy, GoalPolicy::Any);
+        assert!(goal_spec.checks.iter().any(|check| {
+            matches!(
+                check,
+                SemanticGoalCheck::NamedElementExists { name, kind: None }
+                    if name == "ReduceEnergyUse"
+            )
+        }));
+        assert_eq!(agent_request.focus, request.focus);
+    }
 }
