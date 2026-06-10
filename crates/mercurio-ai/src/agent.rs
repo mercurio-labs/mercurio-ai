@@ -3,14 +3,14 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use mercurio_capability_api::{
+    FindingSeverity, ReasoningReport, SemanticArtifactRef, SemanticContextKind, SemanticContextRef,
+};
 use mercurio_core::runtime::Runtime;
 use mercurio_core::{
     AnalysisScope, CapabilityRegistry, CapabilityRunReport, CapabilityRunRequest, CapabilityTarget,
     ElementRef, FeasibilityStatus, GoalEvaluation, KirDocument, MutationContext, SemanticGoalCheck,
     SemanticGoalSpec, SemanticWorkspaceSnapshot, WorkspaceRevision, default_stdlib_path,
-};
-use mercurio_reasoner_api::{
-    FindingSeverity, ReasoningReport, SemanticArtifactRef, SemanticContextKind, SemanticContextRef,
 };
 use mercurio_reference_capabilities::{
     analyze_requirement_coverage, analyze_semantic_impact, analyze_state_machine_analysis,
