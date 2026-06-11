@@ -511,9 +511,16 @@ fn ask_mercurio_with_provider(
         workspace: None,
         cognitive_context: None,
     };
-    let chat = provider
-        .complete_chat(&chat_request)
-        .unwrap_or_else(|_| heuristic_provider().complete_chat(&chat_request).unwrap());
+    let chat = match provider.complete_chat(&chat_request) {
+        Ok(chat) => chat,
+        Err(provider_err) => heuristic_provider()
+            .complete_chat(&chat_request)
+            .map_err(|fallback_err| {
+                format!(
+                    "configured AI provider failed ({provider_err}); heuristic fallback also failed ({fallback_err})"
+                )
+            })?,
+    };
     let citations = ask_mercurio_citations(project.as_ref(), &chat.message);
     let artifacts = ask_mercurio_artifacts(
         &task,
