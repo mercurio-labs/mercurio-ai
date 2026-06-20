@@ -58,12 +58,16 @@ pub use mercurio_core::{
     CognitiveContext, CognitiveDiagnostic, CognitiveDiagnosticSeverity, CognitiveElement,
     CognitiveFocus, CognitiveRelationship, CoreMutationFeasibilityService, DesignIntent, Edge,
     Element, ElementRef, FeasibilityStatus, GoalEvaluation, GoalPolicy, Graph, KirDocument,
-    MutationApplicationResult, MutationContext, MutationEvidence, MutationFeasibilityReport,
-    MutationFeasibilityService, MutationProposal, NodeId, SemanticArtifact, SemanticElementRef,
-    SemanticExpression, SemanticGoalCheck, SemanticGoalExplanation, SemanticGoalSpec,
-    SemanticMutation, SemanticMutationCapabilityContext, SemanticReasoningContext,
-    SemanticWorkspaceRef, SourceSpanRef, WorkspaceRevision, default_stdlib_path,
-    design_intent_to_assessment_spec, design_intent_to_semantic_goal_spec, stable_digest,
+    KirElement, ModelArtifact, ModelBuildRecord, ModelRevision, ModelRevisionEnvelope,
+    ModelRevisionId, ModelRevisionProducer, ModelServicePullRequest, ModelServicePullResponse,
+    ModelServicePushRevisionRequest, ModelServicePushRevisionResponse, ModelState,
+    ModelStateDescriptor, ModelStateId, MutationApplicationResult, MutationContext,
+    MutationEvidence, MutationFeasibilityReport, MutationFeasibilityService, MutationProposal,
+    NodeId, RemoteModelRef, SemanticArtifact, SemanticElementRef, SemanticExpression,
+    SemanticGoalCheck, SemanticGoalExplanation, SemanticGoalSpec, SemanticMutation,
+    SemanticMutationCapabilityContext, SemanticReasoningContext, SemanticWorkspaceRef,
+    SourceSpanRef, WorkspaceRevision, default_stdlib_path, design_intent_to_assessment_spec,
+    design_intent_to_semantic_goal_spec, stable_digest,
 };
 pub use mercurio_requirements::{
     default_model_quality_profile, evaluate_semantic_goal, explain_semantic_goal,
@@ -509,6 +513,7 @@ fn ask_mercurio_with_provider(
         messages: request.messages.clone(),
         context: chat_context,
         workspace: None,
+        model_revision: None,
         cognitive_context: None,
     };
     let chat = match provider.complete_chat(&chat_request) {

@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 use crate::{SemanticAgentToolResult, semantic_agent_tool_id};
 use mercurio_core::{
     CognitiveContext, CognitiveDiagnostic, CognitiveDiagnosticSeverity, CognitiveElement,
-    CognitiveFocus, CognitiveRelationship, Edge, Element, ElementRef, Graph, KirDocument, NodeId,
-    SemanticArtifact, SemanticElementRef, SemanticWorkspaceRef, SourceSpanRef, WorkspaceRevision,
-    stable_digest,
+    CognitiveFocus, CognitiveRelationship, Edge, Element, ElementRef, Graph, InputSourceKind,
+    KirDocument, ModelRevision, NodeId, SemanticArtifact, SemanticElementRef, SemanticWorkspaceRef,
+    SourceSpanRef, WorkspaceRevision, stable_digest,
 };
 
 #[derive(Debug, Clone)]
@@ -82,10 +82,46 @@ impl SemanticContextBuilder {
         ))
     }
 
+    pub fn build_from_model_revision(
+        &self,
+        revision: &ModelRevision,
+        focus: &[ElementRef],
+        reasoning_tool_results: &[SemanticAgentToolResult],
+    ) -> CognitiveContext {
+        let graph = revision.graph();
+        self.build_from_graph_with_profile(
+            &graph,
+            revision.workspace_revision().clone(),
+            revision.profile_id().map(ToOwned::to_owned),
+            focus,
+            reasoning_tool_results,
+            model_revision_source_uris(revision),
+        )
+    }
+
     pub fn build_from_graph(
         &self,
         graph: &Graph,
         workspace_revision: WorkspaceRevision,
+        focus: &[ElementRef],
+        reasoning_tool_results: &[SemanticAgentToolResult],
+        source_files: BTreeSet<String>,
+    ) -> CognitiveContext {
+        self.build_from_graph_with_profile(
+            graph,
+            workspace_revision,
+            Some("sysml".to_string()),
+            focus,
+            reasoning_tool_results,
+            source_files,
+        )
+    }
+
+    fn build_from_graph_with_profile(
+        &self,
+        graph: &Graph,
+        workspace_revision: WorkspaceRevision,
+        profile_id: Option<String>,
         focus: &[ElementRef],
         reasoning_tool_results: &[SemanticAgentToolResult],
         source_files: BTreeSet<String>,
@@ -187,7 +223,7 @@ impl SemanticContextBuilder {
         CognitiveContext {
             workspace: Some(SemanticWorkspaceRef {
                 revision: workspace_revision,
-                profile_id: Some("sysml".to_string()),
+                profile_id,
             }),
             focus: cognitive_focus,
             elements,
@@ -199,6 +235,26 @@ impl SemanticContextBuilder {
             truncated,
         }
     }
+}
+
+fn model_revision_source_uris(revision: &ModelRevision) -> BTreeSet<String> {
+    revision
+        .build()
+        .input_source_set
+        .as_ref()
+        .into_iter()
+        .flat_map(|source_set| source_set.sources.iter())
+        .filter(|source| {
+            matches!(
+                source.kind,
+                InputSourceKind::SourceDocument
+                    | InputSourceKind::SourceFile
+                    | InputSourceKind::KirDocument
+                    | InputSourceKind::RemoteModel
+            )
+        })
+        .map(|source| source.uri.clone())
+        .collect()
 }
 
 fn resolve_focus_nodes(graph: &Graph, focus: &[ElementRef]) -> Vec<NodeId> {
