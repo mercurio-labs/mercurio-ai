@@ -4,9 +4,9 @@ use serde_json::Value;
 
 use crate::{
     AiWorkbenchMode, AiWorkbenchRequest, AiWorkbenchResponse, AiWorkspaceInput,
-    ChatCompletionRequest, ReasoningProvider, ReasoningProviderConfigOverrides,
+    ChatCompletionRequest, ModelRevision, ReasoningProvider, ReasoningProviderConfigOverrides,
     ReasoningProviderSecretOverrides, SemanticAgentRunRequest, SemanticAgentRunStatus,
-    SemanticAgentToolKind, SemanticAgentToolMode, complete_configured_chat,
+    SemanticAgentToolKind, SemanticAgentToolMode, SemanticContextBuilder, complete_configured_chat,
     configured_reasoning_provider, default_model_quality_profile,
     design_intent_to_semantic_goal_spec, latest_user_content, run_semantic_mutation_agent,
 };
@@ -93,12 +93,33 @@ pub fn run_configured_workbench_interaction(
     if let Some(workspace) = request.workspace.as_ref() {
         context.extend(ai_workspace_input_context_lines(workspace));
     }
+    let model_revision = request
+        .model_revision
+        .clone()
+        .map(|envelope| envelope.into_model_revision())
+        .transpose()
+        .map_err(|err| format!("invalid model revision envelope: {err}"))?;
+    if let Some(revision) = model_revision.as_ref() {
+        context.extend(ai_model_revision_context_lines(revision));
+    }
+    let cognitive_context = match (&request.cognitive_context, model_revision.as_ref()) {
+        (Some(context), _) => Some(context.clone()),
+        (None, Some(revision)) => {
+            Some(SemanticContextBuilder::default().build_from_model_revision(
+                revision,
+                &request.focus,
+                &[],
+            ))
+        }
+        (None, None) => None,
+    };
 
     let chat_request = ChatCompletionRequest {
         messages: request.messages.clone(),
         context,
         workspace: request.workspace.clone(),
-        cognitive_context: request.cognitive_context.clone(),
+        model_revision: request.model_revision.clone(),
+        cognitive_context,
     };
     complete_configured_chat(config, secrets, &chat_request).map(AiWorkbenchResponse::from)
 }
@@ -172,10 +193,45 @@ fn ai_workspace_input_context_lines(workspace: &AiWorkspaceInput) -> Vec<String>
     lines
 }
 
+fn ai_model_revision_context_lines(revision: &ModelRevision) -> Vec<String> {
+    let descriptor = revision.descriptor();
+    let mut lines = vec![
+        format!("Model revision: {}", descriptor.id),
+        format!("Model revision producer: {:?}", descriptor.producer),
+        format!("Model element count: {}", descriptor.element_count),
+    ];
+    if let Some(profile_id) = descriptor.profile_id {
+        lines.push(format!("Model profile: {profile_id}"));
+    }
+    if let Some(source_set) = revision.build().input_source_set.as_ref() {
+        lines.push(format!(
+            "Model input source set: {} ({} sources)",
+            source_set.id,
+            source_set.sources.len()
+        ));
+        if !source_set.sources.is_empty() {
+            lines.push(format!(
+                "Model input sources: {}",
+                source_set
+                    .sources
+                    .iter()
+                    .map(|source| source.uri.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AiWorkbenchMode, DesignIntent, ElementRef, GoalPolicy, SemanticGoalCheck};
+    use crate::{
+        AiWorkbenchMode, DesignIntent, ElementRef, GoalPolicy, KirDocument, KirElement,
+        ModelBuildRecord, ModelRevisionProducer, SemanticGoalCheck,
+    };
+    use serde_json::json;
 
     #[test]
     fn workbench_exploration_maps_design_intent_to_semantic_goal_spec() {
@@ -194,6 +250,7 @@ mod tests {
             }),
             focus: vec![focus],
             workspace: None,
+            model_revision: None,
             cognitive_context: None,
         };
         let agent_request = exploration_agent_request(
@@ -214,5 +271,32 @@ mod tests {
             )
         }));
         assert_eq!(agent_request.focus, request.focus);
+    }
+
+    #[test]
+    fn model_revision_context_lines_include_revision_provenance() {
+        let revision = crate::ModelRevision::from_kir_document(
+            KirDocument {
+                metadata: BTreeMap::new(),
+                elements: vec![KirElement {
+                    id: "part.Vehicle".to_string(),
+                    kind: "PartDefinition".to_string(),
+                    layer: 2,
+                    properties: BTreeMap::from([("declared_name".to_string(), json!("Vehicle"))]),
+                }],
+            },
+            ModelBuildRecord::new(ModelRevisionProducer::RemotePull),
+        )
+        .unwrap();
+
+        let lines = ai_model_revision_context_lines(&revision);
+
+        assert!(lines.iter().any(|line| line.starts_with("Model revision:")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Model revision producer: RemotePull")
+        );
+        assert!(lines.iter().any(|line| line == "Model element count: 1"));
     }
 }
