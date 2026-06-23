@@ -268,6 +268,7 @@ fn resolve_tool_element_ref(graph: &Graph, element_ref: &ElementRef) -> Semantic
                 .rsplit(['.', ':', '/'])
                 .find(|part| !part.is_empty())
                 .map(ToOwned::to_owned),
+            semantic_anchor: None,
         })
 }
 
@@ -314,6 +315,7 @@ fn ai_semantic_element_ref(element: &Element) -> SemanticElementRef {
                     .find(|part| !part.is_empty())
                     .map(ToOwned::to_owned)
             }),
+        semantic_anchor: None,
     }
 }
 
