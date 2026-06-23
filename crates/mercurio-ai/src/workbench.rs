@@ -176,9 +176,7 @@ fn ai_workspace_input_context_lines(workspace: &AiWorkspaceInput) -> Vec<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        AiWorkbenchMode, DesignIntent, ElementRef, GoalPolicy, SemanticGoalCheck,
-    };
+    use crate::{AiWorkbenchMode, DesignIntent, ElementRef, GoalPolicy, SemanticGoalCheck};
 
     #[test]
     fn workbench_exploration_maps_design_intent_to_semantic_goal_spec() {

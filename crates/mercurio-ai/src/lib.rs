@@ -61,10 +61,10 @@ pub use mercurio_core::{
     KirElement, MutationApplicationResult, MutationContext, MutationEvidence,
     MutationFeasibilityReport, MutationFeasibilityService, MutationProposal, NodeId,
     SemanticArtifact, SemanticElementRef, SemanticExpression, SemanticGoalCheck,
-    SemanticGoalExplanation, SemanticGoalSpec, SemanticMutation,
-    SemanticMutationCapabilityContext, SemanticReasoningContext, SemanticWorkspaceRef,
-    SourceSpanRef, WorkspaceRevision, default_stdlib_path, design_intent_to_assessment_spec,
-    design_intent_to_semantic_goal_spec, stable_digest,
+    SemanticGoalExplanation, SemanticGoalSpec, SemanticMutation, SemanticMutationCapabilityContext,
+    SemanticReasoningContext, SemanticWorkspaceRef, SourceSpanRef, WorkspaceRevision,
+    default_stdlib_path, design_intent_to_assessment_spec, design_intent_to_semantic_goal_spec,
+    stable_digest,
 };
 pub use mercurio_requirements::{
     default_model_quality_profile, evaluate_semantic_goal, explain_semantic_goal,
