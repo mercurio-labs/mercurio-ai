@@ -72,7 +72,8 @@ pub(crate) fn semantic_mutation_agent_guidance() -> Value {
         "operation_rule": "Every proposal must contain at least one operation. Empty proposals are ignored.",
         "quality_rule": "When a requirement already exists without id or text, prefer SetAttribute operations for id and text before adding more requirements.",
         "batching_rule": "Batch related operations only when their containers and referenced types already exist in the current semantic context.",
-        "affordance_rule": "Prefer operations supported by semantic_context.affordances for the target element."
+        "affordance_rule": "Prefer operations marked Allowed in semantic_context.affordances for the target element; treat Blocked or Unknown affordances as legality guidance to avoid or repair.",
+        "legality_rule": "Use capability_context.usage_typing_rules and capability_context.relationship_target_rules when choosing usage types and relationship targets; core feasibility remains authoritative."
     })
 }
 

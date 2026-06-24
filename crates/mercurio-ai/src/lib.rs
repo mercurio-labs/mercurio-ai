@@ -795,6 +795,11 @@ package HybridVehicle {
         assert!(prompt.contains("coverage.req.missing_satisfy"));
         assert!(prompt.contains("Every requirement element must have non-empty semantic field"));
         assert!(prompt.contains("Never use keyword `block`"));
+        assert!(prompt.contains("usage_typing_rules"));
+        assert!(prompt.contains("relationship_target_rules"));
+        assert!(prompt.contains("action usages should be typed by action definitions"));
+        assert!(prompt.contains("satisfy relationships must target requirement-like elements"));
+        assert!(prompt.contains("legality_rule"));
         assert!(prompt.contains("HybridVehicle.HybridVehicle"));
     }
 
