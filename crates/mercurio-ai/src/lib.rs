@@ -371,6 +371,7 @@ pub struct VariantExplorationCandidate {
     pub score: f64,
     pub rationale: String,
     pub preview: mercurio_core::SemanticVariantPreview,
+    pub compare_report: mercurio_core::SemanticModelCompareReport,
 }
 
 pub fn propose_checked_semantic_mutations<P, F>(
@@ -1223,6 +1224,25 @@ package HybridVehicle {
         assert_eq!(
             report.candidates[0].preview.authority.baseline_unchanged,
             true
+        );
+        assert_eq!(
+            report.candidates[0].compare_report.schema_version,
+            "mercurio.semantic_model_compare.v1"
+        );
+        assert!(
+            report
+                .candidates
+                .iter()
+                .flat_map(|candidate| candidate.compare_report.changes.iter())
+                .any(|change| {
+                    change.element.element_id.contains("Sensor")
+                        || change
+                            .element
+                            .qualified_name
+                            .as_deref()
+                            .is_some_and(|name| name.contains("Sensor"))
+                }),
+            "{run:#?}"
         );
     }
 

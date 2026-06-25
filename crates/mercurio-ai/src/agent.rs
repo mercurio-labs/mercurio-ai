@@ -12,7 +12,7 @@ use mercurio_core::{
     CoreSemanticVariantService, ElementRef, FeasibilityStatus, GoalEvaluation, KirDocument,
     MutationContext, SemanticDiff, SemanticGoalCheck, SemanticGoalSpec, SemanticVariantRequest,
     SemanticVariantService, SemanticVariantStatus, SemanticWorkspaceSnapshot, WorkspaceRevision,
-    default_stdlib_path,
+    default_stdlib_path, semantic_model_compare_report_from_diff,
 };
 use mercurio_reference_capabilities::{
     analyze_requirement_coverage, analyze_semantic_impact, analyze_state_machine_analysis,
@@ -396,6 +396,11 @@ fn build_variant_exploration_report(
                 },
             );
             let score = variant_candidate_score(checked, &preview);
+            let compare_report = semantic_model_compare_report_from_diff(
+                context.workspace_revision.clone(),
+                preview.variant_revision.clone(),
+                &preview.diff,
+            );
             VariantExplorationCandidate {
                 rank: 0,
                 proposal_index,
@@ -403,6 +408,7 @@ fn build_variant_exploration_report(
                 score,
                 rationale: variant_candidate_rationale(checked, &preview, score),
                 preview,
+                compare_report,
             }
         })
         .collect::<Vec<_>>();
