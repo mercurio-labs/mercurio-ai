@@ -1,7 +1,6 @@
-use serde::Deserialize;
+﻿use serde::Deserialize;
 use serde_json::{Value, json};
 
-use mercurio_core::AiSemanticContextSnapshot;
 use mercurio_sysml::sysml_semantic_mutation_capability_context;
 
 use crate::{
@@ -47,7 +46,7 @@ pub(crate) fn semantic_mutation_proposal_developer_prompt() -> &'static str {
      inside ElementRef. Do not propose adding an element that already appears in \
      semantic_context.elements. Prefer one coherent batch of 2 to 5 non-empty operations \
      when the required containers and types already exist. For an empty model, create only \
-     the root package first. Use RemoveDeclaration or RemoveUsage for cleanup when \
+     the root package first. Use Remove for cleanup when \
      simplification is requested and the target exists. Requirement definitions should have explicit id and text \
      attributes; use SetAttribute on existing requirement elements to fill missing fields. \
      For exploration, trade studies, or alternatives, treat the proposal as a semantic variant \
@@ -65,7 +64,7 @@ pub(crate) fn semantic_mutation_proposal_user_prompt(
     let ai_semantic_context = request
         .semantic_context
         .as_ref()
-        .map(AiSemanticContextSnapshot::from);
+        .cloned();
     serde_json::to_string_pretty(&json!({
         "capability_context": sysml_semantic_mutation_capability_context(),
         "agent_guidance": semantic_mutation_agent_guidance(),
@@ -262,7 +261,7 @@ pub(crate) fn semantic_mutation_proposal_schema() -> Value {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "RemoveDeclaration": {
+                    "Remove": {
                         "type": "object",
                         "additionalProperties": false,
                         "properties": {
@@ -271,22 +270,7 @@ pub(crate) fn semantic_mutation_proposal_schema() -> Value {
                         "required": ["element"]
                     }
                 },
-                "required": ["RemoveDeclaration"]
-            },
-            {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "RemoveUsage": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "properties": {
-                            "element": element_ref.clone()
-                        },
-                        "required": ["element"]
-                    }
-                },
-                "required": ["RemoveUsage"]
+                "required": ["Remove"]
             },
             {
                 "type": "object",
@@ -422,10 +406,6 @@ pub(crate) fn semantic_mutation_proposal_schema() -> Value {
         "additionalProperties": false,
         "properties": {
             "intent": { "type": "string" },
-            "affected_elements": {
-                "type": "array",
-                "items": element_ref
-            },
             "operations": {
                 "type": "array",
                 "items": operation
@@ -444,7 +424,6 @@ pub(crate) fn semantic_mutation_proposal_schema() -> Value {
         },
         "required": [
             "intent",
-            "affected_elements",
             "operations",
             "evidence",
             "rationale",

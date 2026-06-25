@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod agent;
@@ -624,7 +624,6 @@ mod tests {
             }
             vec![MutationProposal {
                 intent: "Add UAV interceptor definition".to_string(),
-                affected_elements: vec![ElementRef::new("Demo")],
                 operations: vec![SemanticMutation::AddDefinition {
                     container: ElementRef::new("Demo"),
                     keyword: "part".to_string(),
@@ -888,9 +887,6 @@ package HybridVehicle {
                 "proposals": [
                     {
                         "intent": "Add regenerative braking",
-                        "affected_elements": [
-                            { "qualified_name": "HybridVehicle.HybridVehicle" }
-                        ],
                         "operations": [
                             {
                                 "AddDefinition": {
@@ -971,7 +967,6 @@ package HybridVehicle {
         let provider = FixedProposalProvider {
             proposals: vec![MutationProposal {
                 intent: "Add regenerative braking usage".to_string(),
-                affected_elements: vec![ElementRef::new("HybridVehicle.HybridVehicle")],
                 operations: vec![SemanticMutation::AddUsage {
                     container: ElementRef::new("HybridVehicle.HybridVehicle"),
                     keyword: "part".to_string(),
@@ -1331,16 +1326,7 @@ package HybridVehicle {
             );
             println!("intent: {}", checked_proposal.proposal.intent);
             println!("rationale: {:?}", checked_proposal.proposal.rationale);
-            println!(
-                "affected elements: {}",
-                checked_proposal
-                    .proposal
-                    .affected_elements
-                    .iter()
-                    .map(|element| element.qualified_name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+
             println!(
                 "evidence: {}",
                 checked_proposal

@@ -1,4 +1,4 @@
-use crate::{
+﻿use crate::{
     ChatCompletionRequest, ChatCompletionResponse, ChatMessageRole, ElementRef, MutationEvidence,
     MutationProposal, ReasoningProviderStatus, SemanticChangeItem, SemanticChangeKind,
     SemanticMutation, SemanticMutationProposalRequest, SemanticSummaryRequest,
@@ -88,7 +88,6 @@ pub(crate) fn heuristic_semantic_mutation_proposals(
     if !request_context_has_element(request, "HybridVehicle") {
         return vec![MutationProposal {
             intent: "Create the hybrid vehicle model package".to_string(),
-            affected_elements: vec![ElementRef::new("HybridVehicle")],
             operations: vec![SemanticMutation::AddPackage {
                 target_file: "hybrid_vehicle.sysml".to_string(),
                 name: "HybridVehicle".to_string(),
@@ -109,7 +108,6 @@ pub(crate) fn heuristic_semantic_mutation_proposals(
     if !request_context_has_element(request, "HybridVehicle.HybridVehicle") {
         return vec![MutationProposal {
             intent: "Add the core hybrid vehicle element and efficiency requirement".to_string(),
-            affected_elements: vec![ElementRef::new("HybridVehicle")],
             operations: vec![
                 SemanticMutation::AddDefinition {
                     container: ElementRef::new("HybridVehicle"),
@@ -140,7 +138,6 @@ pub(crate) fn heuristic_semantic_mutation_proposals(
     if !request_context_has_element(request, "HybridVehicle.Engine") {
         return vec![MutationProposal {
             intent: "Add the major hybrid powertrain subsystem definitions".to_string(),
-            affected_elements: vec![ElementRef::new("HybridVehicle")],
             operations: vec![
                 SemanticMutation::AddDefinition {
                     container: ElementRef::new("HybridVehicle"),
@@ -177,7 +174,6 @@ pub(crate) fn heuristic_semantic_mutation_proposals(
     if !request_context_has_element(request, "HybridVehicle.HybridVehicle.engine") {
         return vec![MutationProposal {
             intent: "Compose the hybrid vehicle from the major subsystem usages".to_string(),
-            affected_elements: vec![ElementRef::new("HybridVehicle.HybridVehicle")],
             operations: vec![
                 SemanticMutation::AddUsage {
                     container: ElementRef::new("HybridVehicle.HybridVehicle"),
@@ -229,7 +225,6 @@ fn heuristic_requirements_package_proposals(
     if !request_context_has_element(request, "Requirements") {
         return vec![MutationProposal {
             intent: "Create requirements package".to_string(),
-            affected_elements: vec![ElementRef::new("Requirements")],
             operations: vec![SemanticMutation::AddPackage {
                 target_file: "requirements.sysml".to_string(),
                 name: "Requirements".to_string(),
@@ -279,7 +274,6 @@ fn heuristic_requirements_package_proposals(
 
     vec![MutationProposal {
         intent: format!("Add {DEFAULT_REQUIREMENT_COUNT} requirement definitions"),
-        affected_elements: vec![ElementRef::new("Requirements")],
         operations,
         evidence: vec![MutationEvidence {
             element: Some(ElementRef::new("Requirements")),
@@ -387,7 +381,6 @@ fn heuristic_regenerative_braking_proposal(
 
     MutationProposal {
         intent: "Improve hybrid vehicle efficiency through regenerative braking".to_string(),
-        affected_elements: vec![ElementRef::new("HybridVehicle.HybridVehicle")],
         operations,
         evidence: vec![
             MutationEvidence {
