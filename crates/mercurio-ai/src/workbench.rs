@@ -17,19 +17,29 @@ pub fn run_configured_workbench_interaction(
     request: &AiWorkbenchRequest,
 ) -> Result<AiWorkbenchResponse, String> {
     if matches!(request.mode, AiWorkbenchMode::Exploration) {
-        let files = request
+        let (files, source_diagnostic_files) = request
             .workspace
             .as_ref()
             .map(|workspace| {
-                let snapshots = if workspace.source_snapshots.is_empty() {
-                    &workspace.dirty_snapshots
+                let baseline_snapshots = if workspace.source_snapshots.is_empty() {
+                    workspace.dirty_snapshots.as_slice()
                 } else {
-                    &workspace.source_snapshots
+                    workspace.source_snapshots.as_slice()
                 };
-                snapshots
+                let files = baseline_snapshots
                     .iter()
                     .map(|snapshot| (snapshot.path.clone(), snapshot.content.clone()))
-                    .collect::<BTreeMap<_, _>>()
+                    .collect::<BTreeMap<_, _>>();
+                let source_diagnostic_files = if workspace.source_snapshots.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    workspace
+                        .dirty_snapshots
+                        .iter()
+                        .map(|snapshot| (snapshot.path.clone(), snapshot.content.clone()))
+                        .collect::<BTreeMap<_, _>>()
+                };
+                (files, source_diagnostic_files)
             })
             .unwrap_or_default();
         if !files.is_empty() {
@@ -42,7 +52,7 @@ pub fn run_configured_workbench_interaction(
                 .unwrap_or_else(|| latest_user_content(&request.messages).to_string());
             let run = run_semantic_mutation_agent(
                 &provider,
-                exploration_agent_request(request, goal.clone(), files),
+                exploration_agent_request(request, goal.clone(), files, source_diagnostic_files),
             );
             let message = format!(
                 "Semantic exploration {}: {}. Steps: {}.",
@@ -108,6 +118,7 @@ fn exploration_agent_request(
     request: &AiWorkbenchRequest,
     goal: String,
     initial_files: BTreeMap<String, String>,
+    source_diagnostic_files: BTreeMap<String, String>,
 ) -> SemanticAgentRunRequest {
     SemanticAgentRunRequest {
         goal,
@@ -118,6 +129,7 @@ fn exploration_agent_request(
         quality_goal: Some(default_model_quality_profile().goal),
         minimum_quality_score: Some(0.5),
         initial_files,
+        source_diagnostic_files,
         focus: request.focus.clone(),
         max_steps: 6,
         reasoning_tools: vec![
@@ -176,7 +188,10 @@ fn ai_workspace_input_context_lines(workspace: &AiWorkspaceInput) -> Vec<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AiWorkbenchMode, DesignIntent, ElementRef, GoalPolicy, SemanticGoalCheck};
+    use crate::{
+        AiWorkbenchMode, AiWorkspaceDirtySnapshot, AiWorkspaceInput, DesignIntent, ElementRef,
+        GoalPolicy, SemanticGoalCheck,
+    };
 
     #[test]
     fn workbench_exploration_maps_design_intent_to_semantic_goal_spec() {
@@ -201,6 +216,7 @@ mod tests {
             &request,
             "Improve hybrid vehicle efficiency".to_string(),
             BTreeMap::new(),
+            BTreeMap::new(),
         );
         let goal_spec = agent_request
             .goal_spec
@@ -215,5 +231,59 @@ mod tests {
             )
         }));
         assert_eq!(agent_request.focus, request.focus);
+    }
+
+    #[test]
+    fn workbench_exploration_uses_clean_sources_as_baseline_and_dirty_sources_as_diagnostics() {
+        let request = AiWorkbenchRequest {
+            mode: AiWorkbenchMode::Exploration,
+            messages: Vec::new(),
+            intent: None,
+            focus: Vec::new(),
+            workspace: Some(AiWorkspaceInput {
+                workspace_root: None,
+                active_editor_path: None,
+                selected_element_id: None,
+                source_snapshots: vec![AiWorkspaceDirtySnapshot {
+                    path: "model.sysml".to_string(),
+                    content: "package Demo { part def Vehicle; }".to_string(),
+                    revision: Some(1),
+                }],
+                dirty_snapshots: vec![AiWorkspaceDirtySnapshot {
+                    path: "model.sysml".to_string(),
+                    content: "package Demo { part def Vehicle".to_string(),
+                    revision: Some(2),
+                }],
+            }),
+            cognitive_context: None,
+        };
+
+        let baseline = request
+            .workspace
+            .as_ref()
+            .unwrap()
+            .source_snapshots
+            .iter()
+            .map(|snapshot| (snapshot.path.clone(), snapshot.content.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let dirty = request
+            .workspace
+            .as_ref()
+            .unwrap()
+            .dirty_snapshots
+            .iter()
+            .map(|snapshot| (snapshot.path.clone(), snapshot.content.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let agent_request =
+            exploration_agent_request(&request, "Explore".to_string(), baseline, dirty);
+
+        assert_eq!(
+            agent_request.initial_files["model.sysml"],
+            "package Demo { part def Vehicle; }"
+        );
+        assert_eq!(
+            agent_request.source_diagnostic_files["model.sysml"],
+            "package Demo { part def Vehicle"
+        );
     }
 }

@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 
+use mercurio_core::AiSemanticContextSnapshot;
 use mercurio_sysml::sysml_semantic_mutation_capability_context;
 
 use crate::heuristic::{
@@ -465,8 +466,13 @@ fn anthropic_semantic_mutation_message_blocks(
     request: &SemanticMutationProposalRequest,
 ) -> Vec<Value> {
     let mut blocks = Vec::new();
+    let ai_semantic_context = request
+        .semantic_context
+        .as_ref()
+        .map(AiSemanticContextSnapshot::from);
     let stable_context = json!({
         "capability_context": sysml_semantic_mutation_capability_context(),
+        "ai_semantic_context": ai_semantic_context,
         "semantic_context": request.semantic_context,
         "cognitive_context": request.cognitive_context,
     });

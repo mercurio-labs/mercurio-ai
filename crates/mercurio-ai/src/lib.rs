@@ -252,6 +252,8 @@ pub struct SemanticAgentRunRequest {
     pub minimum_quality_score: Option<f64>,
     #[serde(default)]
     pub initial_files: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub source_diagnostic_files: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub focus: Vec<ElementRef>,
     pub max_steps: usize,
@@ -286,6 +288,7 @@ pub enum SemanticAgentToolKind {
     SemanticImpact,
     StateSimulation,
     ModelInspection,
+    SourceDiagnostics,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -787,6 +790,8 @@ package HybridVehicle {
 
         assert!(prompt.contains("capability_context"));
         assert!(prompt.contains("sysml-v2-writable-mutation-v1"));
+        assert!(prompt.contains("ai_semantic_context"));
+        assert!(prompt.contains("mercurio.ai.semantic_context.v1"));
         assert!(prompt.contains("semantic_context"));
         assert!(prompt.contains("cognitive_context"));
         assert!(prompt.contains("grounding_rule"));
@@ -795,10 +800,15 @@ package HybridVehicle {
         assert!(prompt.contains("coverage.req.missing_satisfy"));
         assert!(prompt.contains("Every requirement element must have non-empty semantic field"));
         assert!(prompt.contains("Never use keyword `block`"));
+        assert!(prompt.contains("variant_capabilities"));
+        assert!(prompt.contains("CreateExplorationVariant"));
+        assert!(prompt.contains("variant_rule"));
+        assert!(prompt.contains("source_diagnostics_rule"));
         assert!(prompt.contains("usage_typing_rules"));
         assert!(prompt.contains("relationship_target_rules"));
         assert!(prompt.contains("action usages should be typed by action definitions"));
         assert!(prompt.contains("satisfy relationships must target requirement-like elements"));
+        assert!(prompt.contains("transition_syntax_rule"));
         assert!(prompt.contains("legality_rule"));
         assert!(prompt.contains("HybridVehicle.HybridVehicle"));
     }
@@ -1013,6 +1023,7 @@ package HybridVehicle {
                 quality_goal: None,
                 minimum_quality_score: None,
                 initial_files: BTreeMap::new(),
+                source_diagnostic_files: BTreeMap::new(),
                 focus: Vec::new(),
                 max_steps: 8,
                 reasoning_tools: Vec::new(),
@@ -1059,6 +1070,7 @@ package HybridVehicle {
                 quality_goal: Some(default_model_quality_profile().goal),
                 minimum_quality_score: Some(1.0),
                 initial_files: BTreeMap::new(),
+                source_diagnostic_files: BTreeMap::new(),
                 focus: Vec::new(),
                 max_steps: 3,
                 reasoning_tools: Vec::new(),
@@ -1096,6 +1108,7 @@ package HybridVehicle {
                     "model.sysml".to_string(),
                     "package Demo {}".to_string(),
                 )]),
+                source_diagnostic_files: BTreeMap::new(),
                 focus: Vec::new(),
                 max_steps: 4,
                 reasoning_tools: Vec::new(),
@@ -1125,6 +1138,7 @@ package HybridVehicle {
                     "model.sysml".to_string(),
                     "package Demo {}".to_string(),
                 )]),
+                source_diagnostic_files: BTreeMap::new(),
                 focus: Vec::new(),
                 max_steps: 1,
                 reasoning_tools: Vec::new(),
@@ -1144,6 +1158,45 @@ package HybridVehicle {
     }
 
     #[test]
+    fn semantic_agent_keeps_semantic_baseline_when_dirty_source_has_diagnostics() {
+        let run = run_semantic_mutation_agent(
+            &FixedProposalProvider {
+                proposals: Vec::new(),
+            },
+            SemanticAgentRunRequest {
+                goal: "Explore improvements without applying dirty source".to_string(),
+                goal_spec: None,
+                quality_goal: None,
+                minimum_quality_score: None,
+                initial_files: BTreeMap::from([(
+                    "model.sysml".to_string(),
+                    "package Demo { part def Vehicle; }".to_string(),
+                )]),
+                source_diagnostic_files: BTreeMap::from([(
+                    "model.sysml".to_string(),
+                    "package Demo { part def Vehicle".to_string(),
+                )]),
+                focus: Vec::new(),
+                max_steps: 1,
+                reasoning_tools: Vec::new(),
+                tool_mode: crate::SemanticAgentToolMode::Off,
+            },
+        );
+
+        assert_eq!(run.status, SemanticAgentRunStatus::Stopped, "{run:#?}");
+        let source_diagnostics = run.steps.first().and_then(|step| {
+            step.tool_results
+                .iter()
+                .find(|result| result.tool == SemanticAgentToolKind::SourceDiagnostics)
+        });
+        assert!(
+            source_diagnostics.is_some_and(|result| !result.findings.is_empty()),
+            "{run:#?}"
+        );
+        assert_ne!(run.final_workspace_revision, WorkspaceRevision::unchecked());
+    }
+
+    #[test]
     fn semantic_agent_auto_runs_model_inspection_for_metamodel_questions() {
         let tools = crate::select_semantic_agent_tools(&SemanticAgentRunRequest {
             goal: "What are the attributes of metamodel Element?".to_string(),
@@ -1151,6 +1204,7 @@ package HybridVehicle {
             quality_goal: None,
             minimum_quality_score: None,
             initial_files: BTreeMap::new(),
+            source_diagnostic_files: BTreeMap::new(),
             focus: Vec::new(),
             max_steps: 1,
             reasoning_tools: Vec::new(),
@@ -1372,6 +1426,7 @@ package HybridVehicle {
                 quality_goal: Some(default_model_quality_profile().goal),
                 minimum_quality_score: Some(0.5),
                 initial_files: BTreeMap::new(),
+                source_diagnostic_files: BTreeMap::new(),
                 focus: Vec::new(),
                 max_steps: 8,
                 reasoning_tools: Vec::new(),

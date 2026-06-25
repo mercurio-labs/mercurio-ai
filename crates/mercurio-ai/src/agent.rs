@@ -17,7 +17,8 @@ use mercurio_reference_capabilities::{
 };
 use mercurio_requirements::{evaluate_semantic_goal, explain_semantic_goal};
 use mercurio_sysml::{
-    compile_sysml_text, enrich_sysml_semantic_reasoning_context_with_child_affordances,
+    SemanticCompileStatus, compile_sysml_text, compile_sysml_text_with_context_report,
+    enrich_sysml_semantic_reasoning_context_with_child_affordances,
     load_authoring_project_from_sysml, sysml_mutation_feasibility_service,
     sysml_semantic_reasoning_context_from_authoring_project,
 };
@@ -77,6 +78,11 @@ where
             &request.goal,
             index,
         );
+        let mut tool_results = tool_results;
+        tool_results.extend(source_diagnostic_tool_results(
+            &request.source_diagnostic_files,
+            index,
+        ));
         let cognitive_context = match SemanticContextBuilder::default().build_from_project(
             &context.project,
             context.workspace_revision.clone(),
@@ -200,7 +206,11 @@ where
         project = match load_authoring_project_from_sysml(files.clone()) {
             Ok(project) => project,
             Err(err) => {
-                let stop_reason = format!("applied mutation produced invalid SysML: {err}");
+                let mut tool_results = tool_results;
+                tool_results.extend(source_diagnostic_tool_results(&files, index));
+                let stop_reason = format!(
+                    "applied mutation produced invalid SysML; source diagnostics captured: {err}"
+                );
                 let revision = context.workspace_revision.clone();
                 steps.push(SemanticAgentStep {
                     index,
@@ -224,7 +234,7 @@ where
                 });
                 return SemanticAgentRun {
                     goal: request.goal,
-                    status: SemanticAgentRunStatus::Failed,
+                    status: SemanticAgentRunStatus::Stopped,
                     stop_reason,
                     steps,
                     final_files: files,
@@ -412,10 +422,104 @@ fn run_semantic_agent_tools(
                 SemanticAgentToolKind::ModelInspection => {
                     return run_model_inspection_tool(tool, files, goal, step_index);
                 }
+                SemanticAgentToolKind::SourceDiagnostics => {
+                    return source_diagnostic_tool_results(files, step_index)
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| SemanticAgentToolResult {
+                            tool,
+                            status: "passed".to_string(),
+                            summary: vec!["No source diagnostics were requested.".to_string()],
+                            findings: Vec::new(),
+                            artifact: json!({"diagnosticCount": 0}),
+                        });
+                }
             };
             tool_result_from_report(tool, report)
         })
         .collect()
+}
+
+fn source_diagnostic_tool_results(
+    files: &BTreeMap<String, String>,
+    step_index: usize,
+) -> Vec<SemanticAgentToolResult> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let tool = SemanticAgentToolKind::SourceDiagnostics;
+    let stdlib = match KirDocument::from_path(Path::new(&default_stdlib_path())) {
+        Ok(stdlib) => stdlib,
+        Err(err) => {
+            return vec![tool_error_result(
+                tool,
+                format!("failed to load bundled stdlib for source diagnostics: {err}"),
+            )];
+        }
+    };
+
+    let mut findings = Vec::new();
+    let mut checked_files = Vec::new();
+    for (path, content) in files {
+        let report = compile_sysml_text_with_context_report(content, path, &[], &stdlib);
+        let status = report.status;
+        let diagnostic_count = report.diagnostics.len();
+        checked_files.push(json!({
+            "path": path,
+            "status": format!("{status:?}"),
+            "diagnosticCount": diagnostic_count,
+        }));
+        for (diagnostic_index, diagnostic) in report.diagnostics.into_iter().enumerate() {
+            findings.push(SemanticAgentToolFinding {
+                id: format!(
+                    "source.{}.{}.{}",
+                    step_index,
+                    sanitize_tool_path(path),
+                    diagnostic_index
+                ),
+                severity: if matches!(status, SemanticCompileStatus::Failed) {
+                    "error".to_string()
+                } else {
+                    "warning".to_string()
+                },
+                title: format!("Source diagnostic in {path}"),
+                message: diagnostic.to_string(),
+                elements: Vec::new(),
+            });
+        }
+    }
+
+    let status = if findings.iter().any(|finding| finding.severity == "error") {
+        "failed"
+    } else if findings.is_empty() {
+        "passed"
+    } else {
+        "partial"
+    }
+    .to_string();
+    let summary = if findings.is_empty() {
+        vec![format!(
+            "Checked {} source file(s); no diagnostics.",
+            files.len()
+        )]
+    } else {
+        vec![format!(
+            "Checked {} source file(s); found {} source diagnostic(s).",
+            files.len(),
+            findings.len()
+        )]
+    };
+
+    vec![SemanticAgentToolResult {
+        tool,
+        status,
+        summary,
+        findings,
+        artifact: json!({
+            "schema": "mercurio.ai.source_diagnostics.v1",
+            "checkedFiles": checked_files,
+        }),
+    }]
 }
 
 fn run_model_inspection_tool(
@@ -689,7 +793,14 @@ pub(crate) fn semantic_agent_tool_id(tool: SemanticAgentToolKind) -> &'static st
         SemanticAgentToolKind::SemanticImpact => "semantic_impact",
         SemanticAgentToolKind::StateSimulation => "state_simulation",
         SemanticAgentToolKind::ModelInspection => "model_inspection",
+        SemanticAgentToolKind::SourceDiagnostics => "source_diagnostics",
     }
+}
+
+fn sanitize_tool_path(path: &str) -> String {
+    path.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }
 
 fn severity_label(severity: &FindingSeverity) -> &'static str {

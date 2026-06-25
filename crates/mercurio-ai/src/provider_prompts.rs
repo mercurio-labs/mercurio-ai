@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use mercurio_core::AiSemanticContextSnapshot;
 use mercurio_sysml::sysml_semantic_mutation_capability_context;
 
 use crate::{
@@ -49,15 +50,26 @@ pub(crate) fn semantic_mutation_proposal_developer_prompt() -> &'static str {
      the root package first. Use RemoveDeclaration or RemoveUsage for cleanup when \
      simplification is requested and the target exists. Requirement definitions should have explicit id and text \
      attributes; use SetAttribute on existing requirement elements to fill missing fields. \
+     For exploration, trade studies, or alternatives, treat the proposal as a semantic variant \
+     preview over the current baseline; do not assume baseline changes are accepted. \
+     Source diagnostics may explain dirty editor text, but semantic_context and cognitive_context \
+     remain authoritative for model mutations. \
+     For transition source syntax use `transition name first Source accept trigger then Target;` \
+     or `accept Trigger then Target;`; do not use raw source patches for transitions. \
      Core feasibility will reject impossible changes."
 }
 
 pub(crate) fn semantic_mutation_proposal_user_prompt(
     request: &SemanticMutationProposalRequest,
 ) -> String {
+    let ai_semantic_context = request
+        .semantic_context
+        .as_ref()
+        .map(AiSemanticContextSnapshot::from);
     serde_json::to_string_pretty(&json!({
         "capability_context": sysml_semantic_mutation_capability_context(),
         "agent_guidance": semantic_mutation_agent_guidance(),
+        "ai_semantic_context": ai_semantic_context,
         "request": request,
     }))
     .unwrap_or_else(|_| "{}".to_string())
@@ -66,14 +78,18 @@ pub(crate) fn semantic_mutation_proposal_user_prompt(
 pub(crate) fn semantic_mutation_agent_guidance() -> Value {
     json!({
         "element_ref_format": "Use dot-qualified names such as HybridVehicle.Vehicle, never HybridVehicle::Vehicle.",
-        "current_state_rule": "Treat cognitive_context.elements and semantic_context.elements as already existing. Do not re-add them.",
+        "current_state_rule": "Treat cognitive_context.elements, ai_semantic_context.elements, and semantic_context.elements as already existing. Do not re-add them.",
         "grounding_rule": "Use cognitive_context as authoritative structured context. Prefer KIR element_id for evidence identity, and use qualified_name only as ElementRef display/input metadata.",
         "citation_rule": "When reasoning_tool_results or cognitive_context.diagnostics identify a relevant finding, cite its id and related element in proposal evidence.",
         "operation_rule": "Every proposal must contain at least one operation. Empty proposals are ignored.",
         "quality_rule": "When a requirement already exists without id or text, prefer SetAttribute operations for id and text before adding more requirements.",
         "batching_rule": "Batch related operations only when their containers and referenced types already exist in the current semantic context.",
-        "affordance_rule": "Prefer operations marked Allowed in semantic_context.affordances for the target element; treat Blocked or Unknown affordances as legality guidance to avoid or repair.",
-        "legality_rule": "Use capability_context.usage_typing_rules and capability_context.relationship_target_rules when choosing usage types and relationship targets; core feasibility remains authoritative."
+        "affordance_rule": "Prefer operations marked Allowed in ai_semantic_context.affordances or semantic_context.affordances for the target element; treat Blocked or Unknown affordances as legality guidance to avoid or repair.",
+        "legality_rule": "Use capability_context.usage_typing_rules and capability_context.relationship_target_rules when choosing usage types and relationship targets; core feasibility remains authoritative.",
+        "variant_rule": "When the user asks to explore, compare alternatives, or try a what-if change, produce semantic mutations intended for capability_context.variant_capabilities. The baseline remains unchanged until a checked variant is accepted.",
+        "source_diagnostics_rule": "Treat source_diagnostics findings as advisory authoring feedback about dirty text. Do not infer new semantic truth from invalid source when semantic context is available.",
+        "transition_syntax_rule": "If transition source text is unavoidable, use `transition start first Idle accept start then Printing;` or `accept Start then Waiting;`. Prefer semantic mutation operations over source text.",
+        "repair_rule": "When a checked proposal returns feasibility.repair_hints, revise the proposal by applying those hints through semantic operations rather than source-text patches."
     })
 }
 
