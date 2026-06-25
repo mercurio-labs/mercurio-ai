@@ -6,9 +6,8 @@ use crate::{SemanticAgentToolResult, semantic_agent_tool_id};
 use mercurio_core::{
     CognitiveContext, CognitiveDiagnostic, CognitiveDiagnosticSeverity, CognitiveElement,
     CognitiveFocus, CognitiveRelationship, DiagnosticKind, Edge, Element, ElementRef, Graph,
-    KirDocument, NodeId,
-    SemanticArtifact, SemanticElementRef, SemanticWorkspaceRef, SourceSpanRef, WorkspaceRevision,
-    stable_digest,
+    KirDocument, NodeId, SemanticArtifact, SemanticElementRef, SemanticWorkspaceRef, SourceSpanRef,
+    WorkspaceRevision, stable_digest,
 };
 
 #[derive(Debug, Clone)]
@@ -337,15 +336,14 @@ fn resolve_element_ref<'a>(graph: &'a Graph, element_ref: &ElementRef) -> Option
 fn resolve_tool_element_ref(graph: &Graph, element_ref: &ElementRef) -> SemanticElementRef {
     resolve_element_ref(graph, element_ref)
         .map(ai_semantic_element_ref)
-        .unwrap_or_else(|| SemanticElementRef {
-            element_id: element_ref.qualified_name.clone(),
-            qualified_name: Some(element_ref.qualified_name.clone()),
-            label: element_ref
-                .qualified_name
-                .rsplit(['.', ':', '/'])
-                .find(|part| !part.is_empty())
-                .map(ToOwned::to_owned),
-            semantic_anchor: None,
+        .unwrap_or_else(|| {
+            SemanticElementRef::unresolved(element_ref.qualified_name.clone()).with_label_optional(
+                element_ref
+                    .qualified_name
+                    .rsplit(['.', ':', '/'])
+                    .find(|part| !part.is_empty())
+                    .map(ToOwned::to_owned),
+            )
         })
 }
 
@@ -379,21 +377,7 @@ fn ai_cognitive_relationship(
 }
 
 fn ai_semantic_element_ref(element: &Element) -> SemanticElementRef {
-    let properties = element.properties.to_btree_map();
-    SemanticElementRef {
-        element_id: element.element_id.clone(),
-        qualified_name: ai_string_property(&properties, "qualified_name"),
-        label: ai_string_property(&properties, "declared_name")
-            .or_else(|| ai_string_property(&properties, "name"))
-            .or_else(|| {
-                element
-                    .element_id
-                    .rsplit(['.', ':', '/'])
-                    .find(|part| !part.is_empty())
-                    .map(ToOwned::to_owned)
-            }),
-        semantic_anchor: None,
-    }
+    SemanticElementRef::from_graph_element(element)
 }
 
 fn cognitive_diagnostics_from_tool_results(
