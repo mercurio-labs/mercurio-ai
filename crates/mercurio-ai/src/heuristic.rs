@@ -4,6 +4,7 @@
     SemanticMutation, SemanticMutationProposalRequest, SemanticSummaryRequest,
     SemanticSummaryResponse, chat_completion_response,
 };
+use mercurio_core::SemanticElementKind;
 
 const DEFAULT_REQUIREMENT_COUNT: usize = 10;
 
@@ -109,18 +110,8 @@ pub(crate) fn heuristic_semantic_mutation_proposals(
         return vec![MutationProposal {
             intent: "Add the core hybrid vehicle element and efficiency requirement".to_string(),
             operations: vec![
-                SemanticMutation::AddDefinition {
-                    container: ElementRef::new("HybridVehicle"),
-                    keyword: "part".to_string(),
-                    name: "HybridVehicle".to_string(),
-                    specializes: Vec::new(),
-                },
-                SemanticMutation::AddDefinition {
-                    container: ElementRef::new("HybridVehicle"),
-                    keyword: "requirement".to_string(),
-                    name: "ImproveEfficiency".to_string(),
-                    specializes: Vec::new(),
-                },
+                add_element_definition("HybridVehicle", "PartDefinition", "HybridVehicle"),
+                add_element_definition("HybridVehicle", "RequirementDefinition", "ImproveEfficiency"),
             ],
             evidence: vec![MutationEvidence {
                 element: Some(ElementRef::new("HybridVehicle")),
@@ -139,24 +130,9 @@ pub(crate) fn heuristic_semantic_mutation_proposals(
         return vec![MutationProposal {
             intent: "Add the major hybrid powertrain subsystem definitions".to_string(),
             operations: vec![
-                SemanticMutation::AddDefinition {
-                    container: ElementRef::new("HybridVehicle"),
-                    keyword: "part".to_string(),
-                    name: "Engine".to_string(),
-                    specializes: Vec::new(),
-                },
-                SemanticMutation::AddDefinition {
-                    container: ElementRef::new("HybridVehicle"),
-                    keyword: "part".to_string(),
-                    name: "ElectricMotor".to_string(),
-                    specializes: Vec::new(),
-                },
-                SemanticMutation::AddDefinition {
-                    container: ElementRef::new("HybridVehicle"),
-                    keyword: "part".to_string(),
-                    name: "BatteryPack".to_string(),
-                    specializes: Vec::new(),
-                },
+                add_element_definition("HybridVehicle", "PartDefinition", "Engine"),
+                add_element_definition("HybridVehicle", "PartDefinition", "ElectricMotor"),
+                add_element_definition("HybridVehicle", "PartDefinition", "BatteryPack"),
             ],
             evidence: vec![MutationEvidence {
                 element: Some(ElementRef::new("HybridVehicle.HybridVehicle")),
@@ -175,27 +151,24 @@ pub(crate) fn heuristic_semantic_mutation_proposals(
         return vec![MutationProposal {
             intent: "Compose the hybrid vehicle from the major subsystem usages".to_string(),
             operations: vec![
-                SemanticMutation::AddUsage {
-                    container: ElementRef::new("HybridVehicle.HybridVehicle"),
-                    keyword: "part".to_string(),
-                    name: "engine".to_string(),
-                    ty: Some(ElementRef::new("HybridVehicle.Engine")),
-                    specializes: Vec::new(),
-                },
-                SemanticMutation::AddUsage {
-                    container: ElementRef::new("HybridVehicle.HybridVehicle"),
-                    keyword: "part".to_string(),
-                    name: "motor".to_string(),
-                    ty: Some(ElementRef::new("HybridVehicle.ElectricMotor")),
-                    specializes: Vec::new(),
-                },
-                SemanticMutation::AddUsage {
-                    container: ElementRef::new("HybridVehicle.HybridVehicle"),
-                    keyword: "part".to_string(),
-                    name: "battery".to_string(),
-                    ty: Some(ElementRef::new("HybridVehicle.BatteryPack")),
-                    specializes: Vec::new(),
-                },
+                add_element_usage(
+                    "HybridVehicle.HybridVehicle",
+                    "PartUsage",
+                    "engine",
+                    Some("HybridVehicle.Engine"),
+                ),
+                add_element_usage(
+                    "HybridVehicle.HybridVehicle",
+                    "PartUsage",
+                    "motor",
+                    Some("HybridVehicle.ElectricMotor"),
+                ),
+                add_element_usage(
+                    "HybridVehicle.HybridVehicle",
+                    "PartUsage",
+                    "battery",
+                    Some("HybridVehicle.BatteryPack"),
+                ),
             ],
             evidence: vec![MutationEvidence {
                 element: Some(ElementRef::new("HybridVehicle.HybridVehicle")),
@@ -254,12 +227,11 @@ fn heuristic_requirements_package_proposals(
     let mut operations = Vec::new();
     for spec in missing {
         let element = ElementRef::new(format!("Requirements.{}", spec.name));
-        operations.push(SemanticMutation::AddDefinition {
-            container: ElementRef::new("Requirements"),
-            keyword: "requirement".to_string(),
-            name: spec.name.to_string(),
-            specializes: Vec::new(),
-        });
+        operations.push(add_element_definition(
+            "Requirements",
+            "RequirementDefinition",
+            spec.name,
+        ));
         operations.push(SemanticMutation::SetAttribute {
             element: element.clone(),
             attribute: "id".to_string(),
@@ -354,23 +326,21 @@ fn heuristic_regenerative_braking_proposal(
 ) -> MutationProposal {
     let operations =
         if !request_context_has_element(request, "HybridVehicle.RegenerativeBrakingSystem") {
-            vec![SemanticMutation::AddDefinition {
-                container: ElementRef::new("HybridVehicle"),
-                keyword: "part".to_string(),
-                name: "RegenerativeBrakingSystem".to_string(),
-                specializes: Vec::new(),
-            }]
+            vec![add_element_definition(
+                "HybridVehicle",
+                "PartDefinition",
+                "RegenerativeBrakingSystem",
+            )]
         } else if !request_context_has_element(
             request,
             "HybridVehicle.HybridVehicle.regenerativeBraking",
         ) {
-            vec![SemanticMutation::AddUsage {
-                container: ElementRef::new("HybridVehicle.HybridVehicle"),
-                keyword: "part".to_string(),
-                name: "regenerativeBraking".to_string(),
-                ty: Some(ElementRef::new("HybridVehicle.RegenerativeBrakingSystem")),
-                specializes: Vec::new(),
-            }]
+            vec![add_element_usage(
+                "HybridVehicle.HybridVehicle",
+                "PartUsage",
+                "regenerativeBraking",
+                Some("HybridVehicle.RegenerativeBrakingSystem"),
+            )]
         } else {
             vec![SemanticMutation::AddRelationship {
                 kind: "satisfy".to_string(),
@@ -399,6 +369,33 @@ fn heuristic_regenerative_braking_proposal(
                 .to_string(),
         ),
         workspace_revision: request.workspace_revision.clone(),
+    }
+}
+
+fn add_element_definition(container: &str, metaclass: &str, name: &str) -> SemanticMutation {
+    SemanticMutation::AddElement {
+        container: ElementRef::new(container),
+        kind: SemanticElementKind::new(metaclass),
+        name: name.to_string(),
+        ty: None,
+        specializes: Vec::new(),
+        properties: Default::default(),
+    }
+}
+
+fn add_element_usage(
+    container: &str,
+    metaclass: &str,
+    name: &str,
+    ty: Option<&str>,
+) -> SemanticMutation {
+    SemanticMutation::AddElement {
+        container: ElementRef::new(container),
+        kind: SemanticElementKind::new(metaclass),
+        name: name.to_string(),
+        ty: ty.map(ElementRef::new),
+        specializes: Vec::new(),
+        properties: Default::default(),
     }
 }
 

@@ -1,4 +1,4 @@
-﻿use serde::Deserialize;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use mercurio_sysml::sysml_semantic_mutation_capability_context;
@@ -40,8 +40,10 @@ pub(crate) fn semantic_mutation_proposal_developer_prompt() -> &'static str {
      it contains KIR element ids, graph neighborhoods, diagnostics, and reasoning artifacts. \
      Use semantic_context only as compatibility affordance data. Cite finding ids, artifact ids, \
      and element refs in evidence when they support a proposal. Do not reconstruct semantic truth \
-     from staged source text when structured context is available. Use only supported operation tags, keywords, and relationship \
-     kinds from the supplied capability context and schema. Use dot-qualified ElementRef \
+     from staged source text when structured context is available. Use only supported operation tags, semantic element \
+     metaclasses, and relationship kinds from the supplied capability context and schema. Prefer AddElement \
+     with kind.metaclass from capability_context.element_kinds for new semantic elements; use AddDefinition \
+     or AddUsage only as backward-compatible fallbacks when element_kinds is unavailable. Use dot-qualified ElementRef \
      names exactly as they appear in semantic_context.elements; do not use :: separators \
      inside ElementRef. Do not propose adding an element that already appears in \
      semantic_context.elements. Prefer one coherent batch of 2 to 5 non-empty operations \
@@ -61,10 +63,7 @@ pub(crate) fn semantic_mutation_proposal_developer_prompt() -> &'static str {
 pub(crate) fn semantic_mutation_proposal_user_prompt(
     request: &SemanticMutationProposalRequest,
 ) -> String {
-    let ai_semantic_context = request
-        .semantic_context
-        .as_ref()
-        .cloned();
+    let ai_semantic_context = request.semantic_context.as_ref().cloned();
     serde_json::to_string_pretty(&json!({
         "capability_context": sysml_semantic_mutation_capability_context(),
         "agent_guidance": semantic_mutation_agent_guidance(),
@@ -81,11 +80,12 @@ pub(crate) fn semantic_mutation_agent_guidance() -> Value {
         "grounding_rule": "Use cognitive_context as authoritative structured context. Prefer KIR element_id for evidence identity, and use qualified_name only as ElementRef display/input metadata.",
         "citation_rule": "When reasoning_tool_results or cognitive_context.diagnostics identify a relevant finding, cite its id and related element in proposal evidence.",
         "operation_rule": "Every proposal must contain at least one operation. Empty proposals are ignored.",
+        "semantic_element_rule": "For new model elements, prefer AddElement with kind.metaclass from capability_context.element_kinds. AddDefinition and AddUsage are compatibility forms only.",
         "quality_rule": "When a requirement already exists without id or text, prefer SetAttribute operations for id and text before adding more requirements.",
         "batching_rule": "Batch related operations only when their containers and referenced types already exist in the current semantic context.",
         "affordance_rule": "Prefer operations marked Allowed in ai_semantic_context.affordances or semantic_context.affordances for the target element; treat Blocked or Unknown affordances as legality guidance to avoid or repair.",
         "legality_rule": "Use capability_context.usage_typing_rules and capability_context.relationship_target_rules when choosing usage types and relationship targets; core feasibility remains authoritative.",
-        "variant_rule": "When the user asks to explore, compare alternatives, or try a what-if change, produce semantic mutations intended for capability_context.variant_capabilities. The baseline remains unchanged until a checked variant is accepted.",
+        "variant_rule": "When the user asks to explore, compare alternatives, or try a what-if change, produce semantic mutations intended for capability_context.variant_capabilities. The baseline remains unchanged until a checked variant is accepted. When request.agent_mode is variant_exploration, return multiple distinct proposals when materially different alternatives are available; each proposal will be previewed as one semantic variant candidate.",
         "source_diagnostics_rule": "Treat source_diagnostics findings as advisory authoring feedback about dirty text. Do not infer new semantic truth from invalid source when semantic context is available.",
         "transition_syntax_rule": "If transition source text is unavoidable, use `transition start first Idle accept start then Printing;` or `accept Start then Waiting;`. Prefer semantic mutation operations over source text.",
         "repair_rule": "When a checked proposal returns feasibility.repair_hints, revise the proposal by applying those hints through semantic operations rather than source-text patches."
@@ -161,6 +161,28 @@ pub(crate) fn semantic_mutation_proposal_schema() -> Value {
         "type": "array",
         "items": element_ref.clone()
     });
+    let semantic_metaclass = if capability_context.element_kinds.is_empty() {
+        json!({ "type": "string" })
+    } else {
+        json!({
+            "type": "string",
+            "enum": capability_context.element_kinds
+        })
+    };
+    let semantic_element_kind = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "metaclass": semantic_metaclass,
+            "profile": {
+                "anyOf": [
+                    { "type": "string" },
+                    { "type": "null" }
+                ]
+            }
+        },
+        "required": ["metaclass"]
+    });
     let semantic_expression = json!({
         "type": "object",
         "additionalProperties": false,
@@ -194,6 +216,34 @@ pub(crate) fn semantic_mutation_proposal_schema() -> Value {
                     }
                 },
                 "required": ["AddPackage"]
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "AddElement": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "container": element_ref.clone(),
+                            "kind": semantic_element_kind.clone(),
+                            "name": { "type": "string" },
+                            "ty": {
+                                "anyOf": [
+                                    element_ref.clone(),
+                                    { "type": "null" }
+                                ]
+                            },
+                            "specializes": element_ref_array.clone(),
+                            "properties": {
+                                "type": "object",
+                                "additionalProperties": true
+                            }
+                        },
+                        "required": ["container", "kind", "name", "ty", "specializes", "properties"]
+                    }
+                },
+                "required": ["AddElement"]
             },
             {
                 "type": "object",

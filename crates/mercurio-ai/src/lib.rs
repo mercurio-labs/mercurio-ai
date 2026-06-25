@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod agent;
@@ -244,6 +244,8 @@ pub struct CheckedMutationProposal {
 #[serde(rename_all = "camelCase")]
 pub struct SemanticAgentRunRequest {
     pub goal: String,
+    #[serde(default)]
+    pub agent_mode: SemanticAgentMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_spec: Option<SemanticGoalSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -261,6 +263,14 @@ pub struct SemanticAgentRunRequest {
     pub reasoning_tools: Vec<SemanticAgentToolKind>,
     #[serde(default)]
     pub tool_mode: SemanticAgentToolMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticAgentMode {
+    #[default]
+    ApplyFirstFeasible,
+    VariantExploration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -284,6 +294,7 @@ pub enum SemanticAgentRunStatus {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticAgentToolKind {
+    AnalysisOpportunities,
     RequirementCoverage,
     SemanticImpact,
     StateSimulation,
@@ -333,8 +344,33 @@ pub struct SemanticAgentStep {
     pub tool_results: Vec<SemanticAgentToolResult>,
     pub proposals: Vec<CheckedMutationProposal>,
     pub selected_proposal_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant_exploration: Option<VariantExplorationReport>,
     pub applied: Option<MutationApplicationResult>,
     pub stop_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VariantExplorationReport {
+    pub schema: String,
+    pub base_revision: WorkspaceRevision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_candidate_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<VariantExplorationCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VariantExplorationCandidate {
+    pub rank: usize,
+    pub proposal_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    pub score: f64,
+    pub rationale: String,
+    pub preview: mercurio_core::SemanticVariantPreview,
 }
 
 pub fn propose_checked_semantic_mutations<P, F>(
@@ -594,9 +630,9 @@ mod tests {
     };
     use crate::{
         AskMercurioArtifact, AskMercurioTask, ElementRef, ReasoningProvider, ReasoningProviderKind,
-        SemanticAgentRunRequest, SemanticAgentRunStatus, SemanticAgentToolFinding,
-        SemanticAgentToolKind, SemanticAgentToolResult, SemanticMutation, WorkspaceRevision,
-        explain_semantic_goal,
+        SemanticAgentMode, SemanticAgentRunRequest, SemanticAgentRunStatus,
+        SemanticAgentToolFinding, SemanticAgentToolKind, SemanticAgentToolResult, SemanticMutation,
+        WorkspaceRevision, explain_semantic_goal,
     };
 
     struct FixedProposalProvider {
@@ -1014,6 +1050,7 @@ package HybridVehicle {
             &provider,
             SemanticAgentRunRequest {
                 goal: "Create a minimal hybrid vehicle model that improves efficiency".to_string(),
+                agent_mode: crate::SemanticAgentMode::ApplyFirstFeasible,
                 goal_spec: None,
                 quality_goal: None,
                 minimum_quality_score: None,
@@ -1061,6 +1098,7 @@ package HybridVehicle {
             &provider,
             SemanticAgentRunRequest {
                 goal: "add a requirements package with 10 requirements".to_string(),
+                agent_mode: crate::SemanticAgentMode::ApplyFirstFeasible,
                 goal_spec: None,
                 quality_goal: Some(default_model_quality_profile().goal),
                 minimum_quality_score: Some(1.0),
@@ -1096,6 +1134,7 @@ package HybridVehicle {
             &RequestRevisionProposalProvider,
             SemanticAgentRunRequest {
                 goal: "Create a UAV interceptor".to_string(),
+                agent_mode: crate::SemanticAgentMode::ApplyFirstFeasible,
                 goal_spec: None,
                 quality_goal: Some(default_model_quality_profile().goal),
                 minimum_quality_score: Some(0.5),
@@ -1121,11 +1160,79 @@ package HybridVehicle {
     }
 
     #[test]
+    fn semantic_agent_variant_exploration_returns_ranked_variants_without_applying() {
+        let initial_source = "package Demo {}".to_string();
+        let run = run_semantic_mutation_agent(
+            &FixedProposalProvider {
+                proposals: vec![
+                    MutationProposal {
+                        intent: "Add sensor definition".to_string(),
+                        operations: vec![SemanticMutation::AddDefinition {
+                            container: ElementRef::new("Demo"),
+                            keyword: "part".to_string(),
+                            name: "Sensor".to_string(),
+                            specializes: Vec::new(),
+                        }],
+                        evidence: Vec::new(),
+                        rationale: Some("Sensor alternative".to_string()),
+                        workspace_revision: WorkspaceRevision::unchecked(),
+                    },
+                    MutationProposal {
+                        intent: "Add payload definition".to_string(),
+                        operations: vec![SemanticMutation::AddDefinition {
+                            container: ElementRef::new("Demo"),
+                            keyword: "part".to_string(),
+                            name: "Payload".to_string(),
+                            specializes: Vec::new(),
+                        }],
+                        evidence: Vec::new(),
+                        rationale: Some("Payload alternative".to_string()),
+                        workspace_revision: WorkspaceRevision::unchecked(),
+                    },
+                ],
+            },
+            SemanticAgentRunRequest {
+                goal: "Explore two alternatives".to_string(),
+                agent_mode: SemanticAgentMode::VariantExploration,
+                goal_spec: None,
+                quality_goal: None,
+                minimum_quality_score: None,
+                initial_files: BTreeMap::from([(
+                    "model.sysml".to_string(),
+                    initial_source.clone(),
+                )]),
+                source_diagnostic_files: BTreeMap::new(),
+                focus: Vec::new(),
+                max_steps: 4,
+                reasoning_tools: Vec::new(),
+                tool_mode: crate::SemanticAgentToolMode::Off,
+            },
+        );
+
+        assert_eq!(run.status, SemanticAgentRunStatus::Completed, "{run:#?}");
+        assert_eq!(run.final_files.get("model.sysml"), Some(&initial_source));
+        assert_eq!(run.steps.len(), 1);
+        assert!(run.steps[0].applied.is_none());
+        let report = run.steps[0]
+            .variant_exploration
+            .as_ref()
+            .expect("variant report should be returned");
+        assert_eq!(report.candidates.len(), 2);
+        assert_eq!(report.selected_candidate_index, Some(0));
+        assert_eq!(report.candidates[0].rank, 1);
+        assert_eq!(
+            report.candidates[0].preview.authority.baseline_unchanged,
+            true
+        );
+    }
+
+    #[test]
     fn semantic_agent_auto_runs_reasoning_tools_before_proposing() {
         let run = run_semantic_mutation_agent(
             &RequestRevisionProposalProvider,
             SemanticAgentRunRequest {
                 goal: "Create a UAV interceptor and improve requirement coverage".to_string(),
+                agent_mode: crate::SemanticAgentMode::ApplyFirstFeasible,
                 goal_spec: None,
                 quality_goal: Some(default_model_quality_profile().goal),
                 minimum_quality_score: Some(0.5),
@@ -1160,6 +1267,7 @@ package HybridVehicle {
             },
             SemanticAgentRunRequest {
                 goal: "Explore improvements without applying dirty source".to_string(),
+                agent_mode: crate::SemanticAgentMode::ApplyFirstFeasible,
                 goal_spec: None,
                 quality_goal: None,
                 minimum_quality_score: None,
@@ -1195,6 +1303,7 @@ package HybridVehicle {
     fn semantic_agent_auto_runs_model_inspection_for_metamodel_questions() {
         let tools = crate::select_semantic_agent_tools(&SemanticAgentRunRequest {
             goal: "What are the attributes of metamodel Element?".to_string(),
+            agent_mode: crate::SemanticAgentMode::ApplyFirstFeasible,
             goal_spec: None,
             quality_goal: None,
             minimum_quality_score: None,
@@ -1207,6 +1316,25 @@ package HybridVehicle {
         });
 
         assert!(tools.contains(&crate::SemanticAgentToolKind::ModelInspection));
+    }
+
+    #[test]
+    fn semantic_agent_auto_runs_analysis_opportunities_for_simulation_questions() {
+        let tools = crate::select_semantic_agent_tools(&SemanticAgentRunRequest {
+            goal: "What simulation cases and constraints can I evaluate?".to_string(),
+            agent_mode: crate::SemanticAgentMode::ApplyFirstFeasible,
+            goal_spec: None,
+            quality_goal: None,
+            minimum_quality_score: None,
+            initial_files: BTreeMap::new(),
+            source_diagnostic_files: BTreeMap::new(),
+            focus: Vec::new(),
+            max_steps: 1,
+            reasoning_tools: Vec::new(),
+            tool_mode: crate::SemanticAgentToolMode::Auto,
+        });
+
+        assert!(tools.contains(&crate::SemanticAgentToolKind::AnalysisOpportunities));
     }
 
     #[test]
@@ -1408,6 +1536,7 @@ package HybridVehicle {
             SemanticAgentRunRequest {
                 goal: "Create a minimal SysML v2 semantic model of a hybrid vehicle from an empty model. Build it through small checked semantic mutations. Include a vehicle part definition, engine, electric motor, battery pack, an efficiency requirement, and a regenerative braking concept that satisfies the efficiency requirement."
                     .to_string(),
+                agent_mode: crate::SemanticAgentMode::ApplyFirstFeasible,
                 goal_spec: None,
                 quality_goal: Some(default_model_quality_profile().goal),
                 minimum_quality_score: Some(0.5),

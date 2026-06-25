@@ -78,6 +78,7 @@ impl SemanticContextBuilder {
                 .elements
                 .iter()
                 .filter_map(|element| ai_string_property(&element.properties, "source_file"))
+                .filter(|source_file| !is_standard_library_source_file(source_file))
                 .collect(),
         ))
     }
@@ -110,13 +111,24 @@ impl SemanticContextBuilder {
         source_files: BTreeSet<String>,
     ) -> CognitiveContext {
         let focus_nodes = resolve_focus_nodes(graph, focus);
+        let selection_source_files = normalized_source_files(&source_files);
         let mut selected_nodes = BTreeSet::new();
         let mut queue = VecDeque::new();
         let mut truncated = false;
 
         if focus_nodes.is_empty() {
-            for element in graph.elements().iter().take(self.max_elements) {
-                selected_nodes.insert(element.id);
+            for priority in 0..=3 {
+                for element in graph.elements() {
+                    if selected_nodes.len() >= self.max_elements {
+                        break;
+                    }
+                    if selected_nodes.contains(&element.id) {
+                        continue;
+                    }
+                    if element_context_priority(element, &selection_source_files) == priority {
+                        selected_nodes.insert(element.id);
+                    }
+                }
             }
             truncated = graph.elements().len() > selected_nodes.len();
         } else {
@@ -166,6 +178,7 @@ impl SemanticContextBuilder {
                     .elements
                     .iter()
                     .any(|focus| focus.element_id == element.element.element_id),
+                cognitive_element_context_priority(element, &selection_source_files),
                 element.layer,
                 element.element.element_id.clone(),
             )
@@ -231,6 +244,69 @@ fn resolve_focus_nodes(graph: &Graph, focus: &[ElementRef]) -> Vec<NodeId> {
         }
     }
     nodes
+}
+
+fn element_context_priority(element: &Element, workspace_source_files: &BTreeSet<String>) -> u8 {
+    let properties = element.properties.to_btree_map();
+    let Some(source_file) = ai_element_source_file(&properties) else {
+        return 2;
+    };
+    if is_standard_library_source_file(&source_file) {
+        return 3;
+    }
+    if workspace_source_files.contains(&normalize_source_file(&source_file)) {
+        return 0;
+    }
+    1
+}
+
+fn cognitive_element_context_priority(
+    element: &CognitiveElement,
+    workspace_source_files: &BTreeSet<String>,
+) -> u8 {
+    let source_file = element
+        .source_spans
+        .first()
+        .map(|span| span.file.as_str())
+        .filter(|file| !file.is_empty())
+        .or_else(|| {
+            element
+                .attributes
+                .get("source_file")
+                .and_then(Value::as_str)
+        });
+    let Some(source_file) = source_file else {
+        return 2;
+    };
+    if is_standard_library_source_file(source_file) {
+        return 3;
+    }
+    if workspace_source_files.contains(&normalize_source_file(source_file)) {
+        return 0;
+    }
+    1
+}
+
+fn normalized_source_files(source_files: &BTreeSet<String>) -> BTreeSet<String> {
+    source_files
+        .iter()
+        .filter(|source_file| !is_standard_library_source_file(source_file))
+        .map(|source_file| normalize_source_file(source_file))
+        .collect()
+}
+
+fn normalize_source_file(source_file: &str) -> String {
+    source_file.trim().replace('\\', "/").to_ascii_lowercase()
+}
+
+fn is_standard_library_source_file(source_file: &str) -> bool {
+    let normalized = normalize_source_file(source_file);
+    normalized.starts_with("systems library/")
+        || normalized.starts_with("kernel libraries/")
+        || normalized.starts_with("sysml library/")
+        || normalized.starts_with("sysml-stdlib/")
+        || normalized.contains("/resources/metamodels/")
+        || normalized.contains("/stdlib/")
 }
 
 fn resolve_element_ref<'a>(graph: &'a Graph, element_ref: &ElementRef) -> Option<&'a Element> {
@@ -437,9 +513,76 @@ fn ai_source_span_for_properties(properties: &BTreeMap<String, Value>) -> Option
     })
 }
 
+fn ai_element_source_file(properties: &BTreeMap<String, Value>) -> Option<String> {
+    properties
+        .get("source_file")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            properties
+                .get("metadata")
+                .and_then(|metadata| metadata.get("source_file"))
+                .and_then(Value::as_str)
+        })
+        .map(ToOwned::to_owned)
+}
+
 fn ai_string_property(properties: &BTreeMap<String, Value>, key: &str) -> Option<String> {
     properties
         .get(key)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mercurio_core::KirElement;
+
+    #[test]
+    fn workspace_context_prioritizes_user_source_over_stdlib_without_focus() {
+        let document = KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![
+                test_element("Actions", "Package", "Systems Library/Actions.sysml"),
+                test_element(
+                    "Actions::Action",
+                    "ActionDefinition",
+                    "Systems Library/Actions.sysml",
+                ),
+                test_element("Demo", "Package", "model.sysml"),
+                test_element("Demo::Vehicle", "PartDefinition", "model.sysml"),
+            ],
+        };
+
+        let context = SemanticContextBuilder::default()
+            .max_elements(2)
+            .build_from_document(&document, WorkspaceRevision::unchecked(), &[], &[])
+            .expect("context should build");
+
+        let element_ids = context
+            .elements
+            .iter()
+            .map(|element| element.element.element_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(element_ids, vec!["Demo", "Demo::Vehicle"]);
+        assert_eq!(context.source_files, vec!["model.sysml"]);
+    }
+
+    fn test_element(id: &str, kind: &str, source_file: &str) -> KirElement {
+        KirElement {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            layer: 0,
+            properties: BTreeMap::from([
+                (
+                    "declared_name".to_string(),
+                    Value::String(id.rsplit("::").next().unwrap_or(id).to_string()),
+                ),
+                (
+                    "source_file".to_string(),
+                    Value::String(source_file.to_string()),
+                ),
+            ]),
+        }
+    }
 }

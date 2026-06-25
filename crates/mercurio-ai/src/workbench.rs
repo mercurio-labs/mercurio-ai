@@ -5,8 +5,8 @@ use serde_json::Value;
 use crate::{
     AiWorkbenchMode, AiWorkbenchRequest, AiWorkbenchResponse, AiWorkspaceInput,
     ChatCompletionRequest, ReasoningProvider, ReasoningProviderConfigOverrides,
-    ReasoningProviderSecretOverrides, SemanticAgentRunRequest, SemanticAgentRunStatus,
-    SemanticAgentToolKind, SemanticAgentToolMode, complete_configured_chat,
+    ReasoningProviderSecretOverrides, SemanticAgentMode, SemanticAgentRunRequest,
+    SemanticAgentRunStatus, SemanticAgentToolKind, SemanticAgentToolMode, complete_configured_chat,
     configured_reasoning_provider, default_model_quality_profile,
     design_intent_to_semantic_goal_spec, latest_user_content, run_semantic_mutation_agent,
 };
@@ -122,6 +122,7 @@ fn exploration_agent_request(
 ) -> SemanticAgentRunRequest {
     SemanticAgentRunRequest {
         goal,
+        agent_mode: SemanticAgentMode::VariantExploration,
         goal_spec: request
             .intent
             .as_ref()
@@ -133,6 +134,7 @@ fn exploration_agent_request(
         focus: request.focus.clone(),
         max_steps: 6,
         reasoning_tools: vec![
+            SemanticAgentToolKind::AnalysisOpportunities,
             SemanticAgentToolKind::RequirementCoverage,
             SemanticAgentToolKind::SemanticImpact,
             SemanticAgentToolKind::ModelInspection,

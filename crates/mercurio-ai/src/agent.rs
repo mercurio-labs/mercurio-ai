@@ -9,8 +9,10 @@ use mercurio_capability_api::{
 use mercurio_core::runtime::Runtime;
 use mercurio_core::{
     AnalysisScope, CapabilityRegistry, CapabilityRunReport, CapabilityRunRequest, CapabilityTarget,
-    ElementRef, FeasibilityStatus, GoalEvaluation, KirDocument, MutationContext, SemanticGoalCheck,
-    SemanticGoalSpec, SemanticWorkspaceSnapshot, WorkspaceRevision, default_stdlib_path,
+    CoreSemanticVariantService, ElementRef, FeasibilityStatus, GoalEvaluation, KirDocument,
+    MutationContext, SemanticDiff, SemanticGoalCheck, SemanticGoalSpec, SemanticVariantRequest,
+    SemanticVariantService, SemanticVariantStatus, SemanticWorkspaceSnapshot, WorkspaceRevision,
+    default_stdlib_path,
 };
 use mercurio_reference_capabilities::{
     analyze_requirement_coverage, analyze_semantic_impact, analyze_state_machine_analysis,
@@ -24,10 +26,11 @@ use mercurio_sysml::{
 };
 
 use crate::{
-    SemanticAgentRun, SemanticAgentRunRequest, SemanticAgentRunStatus, SemanticAgentStep,
-    SemanticAgentToolFinding, SemanticAgentToolKind, SemanticAgentToolMode,
+    SemanticAgentMode, SemanticAgentRun, SemanticAgentRunRequest, SemanticAgentRunStatus,
+    SemanticAgentStep, SemanticAgentToolFinding, SemanticAgentToolKind, SemanticAgentToolMode,
     SemanticAgentToolResult, SemanticContextBuilder, SemanticMutationProposalProvider,
-    SemanticMutationProposalRequest, propose_checked_semantic_mutations,
+    SemanticMutationProposalRequest, VariantExplorationCandidate, VariantExplorationReport,
+    propose_checked_semantic_mutations,
 };
 
 pub fn run_semantic_mutation_agent<P>(
@@ -113,6 +116,62 @@ where
         };
         let proposals =
             propose_checked_semantic_mutations(provider, &feasibility, &context, &proposal_request);
+        if request.agent_mode == SemanticAgentMode::VariantExploration {
+            let variant_exploration =
+                build_variant_exploration_report(&context, &request.goal, &proposals);
+            let selected_proposal_index =
+                variant_exploration
+                    .selected_candidate_index
+                    .and_then(|candidate_index| {
+                        variant_exploration
+                            .candidates
+                            .get(candidate_index)
+                            .map(|candidate| candidate.proposal_index)
+                    });
+            let selected_variant_count = variant_exploration.candidates.len();
+            let revision = context.workspace_revision.clone();
+            steps.push(SemanticAgentStep {
+                index,
+                workspace_revision: revision.clone(),
+                semantic_context,
+                goal_evaluation: evaluate_current_goal(
+                    goal_spec.as_ref(),
+                    &context.project,
+                    &request.focus,
+                ),
+                quality_evaluation: evaluate_current_goal(
+                    quality_goal.as_ref(),
+                    &context.project,
+                    &request.focus,
+                ),
+                tool_results,
+                proposals,
+                selected_proposal_index,
+                variant_exploration: Some(variant_exploration),
+                applied: None,
+                stop_reason: Some(if selected_variant_count == 0 {
+                    "variant exploration found no candidate variants".to_string()
+                } else {
+                    format!("variant exploration returned {selected_variant_count} candidate(s)")
+                }),
+            });
+            return SemanticAgentRun {
+                goal: request.goal,
+                status: if selected_variant_count == 0 {
+                    SemanticAgentRunStatus::Stopped
+                } else {
+                    SemanticAgentRunStatus::Completed
+                },
+                stop_reason: if selected_variant_count == 0 {
+                    "variant exploration found no candidate variants".to_string()
+                } else {
+                    format!("variant exploration returned {selected_variant_count} candidate(s)")
+                },
+                steps,
+                final_files: files,
+                final_workspace_revision: revision,
+            };
+        }
         let Some((selected_index, selected)) =
             proposals.iter().enumerate().find(|(_, proposal)| {
                 matches!(
@@ -148,6 +207,7 @@ where
                 tool_results,
                 proposals,
                 selected_proposal_index: None,
+                variant_exploration: None,
                 applied: None,
                 stop_reason: Some(stop_reason.clone()),
             });
@@ -188,6 +248,7 @@ where
                     tool_results,
                     proposals,
                     selected_proposal_index: Some(selected_index),
+                    variant_exploration: None,
                     applied: None,
                     stop_reason: Some(stop_reason.clone()),
                 });
@@ -229,6 +290,7 @@ where
                     tool_results,
                     proposals,
                     selected_proposal_index: Some(selected_index),
+                    variant_exploration: None,
                     applied: Some(applied),
                     stop_reason: Some(stop_reason.clone()),
                 });
@@ -263,6 +325,7 @@ where
             tool_results,
             proposals,
             selected_proposal_index: Some(selected_index),
+            variant_exploration: None,
             applied: Some(applied),
             stop_reason: (goal_satisfied && quality_satisfied)
                 .then(|| "goal and quality satisfied".to_string())
@@ -308,6 +371,131 @@ fn evaluate_current_goal(
     Some(evaluate_semantic_goal(&semantic_context, goal))
 }
 
+fn build_variant_exploration_report(
+    context: &MutationContext,
+    goal: &str,
+    proposals: &[crate::CheckedMutationProposal],
+) -> VariantExplorationReport {
+    let variant_service = CoreSemanticVariantService::new();
+    let mut candidates = proposals
+        .iter()
+        .enumerate()
+        .map(|(proposal_index, checked)| {
+            let proposal_id = checked.proposal_id.clone();
+            let preview = variant_service.preview_variant(
+                context,
+                &SemanticVariantRequest {
+                    variant_id: proposal_id.as_ref().map(|id| format!("variant.{id}")),
+                    label: checked
+                        .proposal
+                        .rationale
+                        .clone()
+                        .unwrap_or_else(|| checked.proposal.intent.clone()),
+                    goal: Some(goal.to_string()),
+                    proposal: checked.proposal.clone(),
+                },
+            );
+            let score = variant_candidate_score(checked, &preview);
+            VariantExplorationCandidate {
+                rank: 0,
+                proposal_index,
+                proposal_id,
+                score,
+                rationale: variant_candidate_rationale(checked, &preview, score),
+                preview,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.proposal_index.cmp(&right.proposal_index))
+    });
+    for (rank, candidate) in candidates.iter_mut().enumerate() {
+        candidate.rank = rank + 1;
+    }
+    let selected_candidate_index = candidates
+        .iter()
+        .position(|candidate| candidate.preview.status == SemanticVariantStatus::ReadyToReview)
+        .or_else(|| (!candidates.is_empty()).then_some(0));
+
+    VariantExplorationReport {
+        schema: "mercurio.ai.variant_exploration.v1".to_string(),
+        base_revision: context.workspace_revision.clone(),
+        selected_candidate_index,
+        candidates,
+    }
+}
+
+fn variant_candidate_score(
+    checked: &crate::CheckedMutationProposal,
+    preview: &mercurio_core::SemanticVariantPreview,
+) -> f64 {
+    let status_score = match preview.status {
+        SemanticVariantStatus::ReadyToReview => 100.0,
+        SemanticVariantStatus::NeedsRevision => 45.0,
+        SemanticVariantStatus::Blocked => 0.0,
+    };
+    let feasibility_score = match checked.feasibility.status {
+        FeasibilityStatus::Allowed => 30.0,
+        FeasibilityStatus::AllowedWithWarnings => 22.0,
+        FeasibilityStatus::RequiresSupportingChanges => 12.0,
+        FeasibilityStatus::RequiresDisambiguation => 8.0,
+        FeasibilityStatus::UnsupportedByAuthoringBackend => 3.0,
+        FeasibilityStatus::Blocked => 0.0,
+    };
+    let operation_score = checked
+        .feasibility
+        .normalized_plan
+        .as_ref()
+        .map(|plan| plan.normalized_operations.len().min(8) as f64 * 2.0)
+        .unwrap_or_default();
+    let diff_score = semantic_diff_size(&preview.diff).min(10) as f64;
+    let penalty = checked.feasibility.blocking_reasons.len() as f64 * 12.0
+        + checked.feasibility.required_choices.len() as f64 * 8.0
+        + checked.feasibility.repair_hints.len() as f64 * 4.0
+        + checked.feasibility.warnings.len() as f64 * 2.0;
+
+    (status_score + feasibility_score + operation_score + diff_score - penalty).max(0.0)
+}
+
+fn variant_candidate_rationale(
+    checked: &crate::CheckedMutationProposal,
+    preview: &mercurio_core::SemanticVariantPreview,
+    score: f64,
+) -> String {
+    let operation_count = checked
+        .feasibility
+        .normalized_plan
+        .as_ref()
+        .map(|plan| plan.normalized_operations.len())
+        .unwrap_or_default();
+    format!(
+        "{:?} variant from {:?} proposal with {} normalized operation(s), {} warning(s), {} blocker(s), and score {:.1}.",
+        preview.status,
+        checked.feasibility.status,
+        operation_count,
+        checked.feasibility.warnings.len(),
+        checked.feasibility.blocking_reasons.len(),
+        score
+    )
+}
+
+fn semantic_diff_size(diff: &SemanticDiff) -> usize {
+    diff.added_elements.len()
+        + diff.removed_elements.len()
+        + diff.renamed_elements.len()
+        + diff.moved_elements.len()
+        + diff.retyped_usages.len()
+        + diff.changed_specializations.len()
+        + diff.changed_attributes.len()
+        + diff.added_relationships.len()
+        + diff.removed_relationships.len()
+}
+
 pub(crate) fn select_semantic_agent_tools(
     request: &SemanticAgentRunRequest,
 ) -> Vec<SemanticAgentToolKind> {
@@ -321,6 +509,17 @@ pub(crate) fn select_semantic_agent_tools(
         SemanticAgentToolMode::RequestedOnly => {}
         SemanticAgentToolMode::Auto => {
             let goal = request.goal.to_ascii_lowercase();
+            if goal.contains("analysis")
+                || goal.contains("analyze")
+                || goal.contains("case")
+                || goal.contains("constraint")
+                || goal.contains("evaluate")
+                || goal.contains("opportunit")
+                || goal.contains("simulate")
+                || goal.contains("simulation")
+            {
+                tools.insert(SemanticAgentToolKind::AnalysisOpportunities);
+            }
             if goal.contains("requirement")
                 || goal.contains("satisfy")
                 || goal.contains("verify")
@@ -390,7 +589,7 @@ fn run_semantic_agent_tools(
                 .collect();
         }
     };
-    let runtime = match Runtime::from_document(document) {
+    let runtime = match Runtime::from_document(document.clone()) {
         Ok(runtime) => runtime,
         Err(err) => {
             return tools
@@ -410,6 +609,9 @@ fn run_semantic_agent_tools(
                 semantic_agent_tool_id(tool)
             );
             let report = match tool {
+                SemanticAgentToolKind::AnalysisOpportunities => {
+                    return run_analysis_opportunities_tool(tool, document.clone(), step_index);
+                }
                 SemanticAgentToolKind::RequirementCoverage => {
                     analyze_requirement_coverage(&runtime, context.clone(), request_id)
                 }
@@ -551,6 +753,39 @@ fn run_model_inspection_tool(
                     Value::String(model_inspection_analysis_scope(goal).as_str().to_string()),
                 ),
             ]),
+            input_artifacts: Vec::new(),
+        },
+    ) {
+        Ok(report) => report,
+        Err(err) => return tool_error_result(tool, err.to_string()),
+    };
+    tool_result_from_capability_report(tool, report)
+}
+
+fn run_analysis_opportunities_tool(
+    tool: SemanticAgentToolKind,
+    document: KirDocument,
+    step_index: usize,
+) -> SemanticAgentToolResult {
+    let snapshot = match SemanticWorkspaceSnapshot::from_document_with_profile(
+        document,
+        Some("sysml".to_string()),
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(err) => return tool_error_result(tool, err.to_string()),
+    };
+    let registry = CapabilityRegistry::with_foundation_builtins();
+    let run_id = format!(
+        "semantic_agent.step{step_index}.{}",
+        semantic_agent_tool_id(tool)
+    );
+    let report = match registry.run(
+        &snapshot,
+        CapabilityRunRequest {
+            run_id,
+            capability_id: "foundation.analysis.opportunities".to_string(),
+            target: CapabilityTarget::Workspace,
+            parameters: BTreeMap::new(),
             input_artifacts: Vec::new(),
         },
     ) {
@@ -789,6 +1024,7 @@ fn tool_error_result(tool: SemanticAgentToolKind, message: String) -> SemanticAg
 
 pub(crate) fn semantic_agent_tool_id(tool: SemanticAgentToolKind) -> &'static str {
     match tool {
+        SemanticAgentToolKind::AnalysisOpportunities => "analysis_opportunities",
         SemanticAgentToolKind::RequirementCoverage => "requirement_coverage",
         SemanticAgentToolKind::SemanticImpact => "semantic_impact",
         SemanticAgentToolKind::StateSimulation => "state_simulation",
