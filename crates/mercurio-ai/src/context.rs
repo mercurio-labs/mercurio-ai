@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 use crate::{SemanticAgentToolResult, semantic_agent_tool_id};
 use mercurio_core::{
     CognitiveContext, CognitiveDiagnostic, CognitiveDiagnosticSeverity, CognitiveElement,
-    CognitiveFocus, CognitiveRelationship, Edge, Element, ElementRef, Graph, KirDocument, NodeId,
+    CognitiveFocus, CognitiveRelationship, DiagnosticKind, Edge, Element, ElementRef, Graph,
+    KirDocument, NodeId,
     SemanticArtifact, SemanticElementRef, SemanticWorkspaceRef, SourceSpanRef, WorkspaceRevision,
     stable_digest,
 };
@@ -403,22 +404,25 @@ fn cognitive_diagnostics_from_tool_results(
         .iter()
         .flat_map(|result| {
             result.findings.iter().map(|finding| {
-                let element = finding
+                let subject = finding
                     .elements
                     .first()
-                    .map(|element_ref| resolve_tool_element_ref(graph, element_ref));
-                CognitiveDiagnostic {
-                    code: finding.id.clone(),
-                    severity: cognitive_severity_from_label(&finding.severity),
-                    message: format!(
+                    .map(|element_ref| resolve_tool_element_ref(graph, element_ref).element_id);
+                let mut diagnostic = CognitiveDiagnostic::new(
+                    DiagnosticKind::Execution,
+                    cognitive_severity_from_label(&finding.severity),
+                    finding.id.clone(),
+                    format!(
                         "{} [{}]: {}",
                         finding.title,
                         semantic_agent_tool_id(result.tool),
                         finding.message
                     ),
-                    element,
-                    source_spans: Vec::new(),
+                );
+                if let Some(subject) = subject {
+                    diagnostic = diagnostic.with_subject(subject);
                 }
+                diagnostic
             })
         })
         .collect()
