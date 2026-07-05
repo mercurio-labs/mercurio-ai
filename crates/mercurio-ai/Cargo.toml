@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-mercurio-core = { package = "mercurio-foundation", path = "../../../mercurio-foundation/crates/mercurio-foundation" }
+mercurio-core = { path = "../../../mercurio-foundation/crates/mercurio-core" }
 mercurio-requirements = { path = "../../../mercurio-sysml/crates/mercurio-requirements" }
 mercurio-sysml = { path = "../../../mercurio-sysml/crates/mercurio-sysml" }
 mercurio-reference-capabilities = { path = "../../../mercurio-plugins/crates/mercurio-reference-capabilities" }
