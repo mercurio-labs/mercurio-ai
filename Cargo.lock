@@ -696,11 +696,35 @@ name = "mercurio-ai"
 version = "0.1.0"
 dependencies = [
  "mercurio-capability-api",
- "mercurio-foundation",
+ "mercurio-core",
  "mercurio-reference-capabilities",
  "mercurio-requirements",
  "mercurio-sysml",
  "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mercurio-analysis"
+version = "0.1.0"
+dependencies = [
+ "mercurio-kir",
+ "mercurio-model",
+ "mercurio-runtime",
+ "mercurio-semantic-services",
+ "mercurio-workspace",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mercurio-authoring"
+version = "0.1.0"
+dependencies = [
+ "mercurio-kir",
+ "mercurio-language-contracts",
+ "mercurio-model",
  "serde",
  "serde_json",
 ]
@@ -714,13 +738,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "mercurio-foundation"
+name = "mercurio-codegen"
 version = "0.1.0"
 dependencies = [
  "mercurio-kir",
  "mercurio-language-contracts",
+ "mercurio-workspace",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mercurio-core"
+version = "0.1.0"
+dependencies = [
+ "mercurio-analysis",
+ "mercurio-authoring",
+ "mercurio-codegen",
+ "mercurio-kir",
+ "mercurio-language-contracts",
  "mercurio-model",
+ "mercurio-query-dsl",
  "mercurio-runtime",
+ "mercurio-semantic-services",
+ "mercurio-session",
+ "mercurio-workspace",
  "rhai",
  "serde",
  "serde_json",
@@ -783,11 +825,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "mercurio-query-dsl"
+version = "0.1.0"
+dependencies = [
+ "mercurio-analysis",
+ "mercurio-kir",
+ "mercurio-model",
+ "mercurio-runtime",
+ "mercurio-semantic-services",
+ "mercurio-session",
+ "mercurio-workspace",
+ "rhai",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mercurio-reference-capabilities"
 version = "0.1.0"
 dependencies = [
  "mercurio-capability-api",
- "mercurio-foundation",
+ "mercurio-core",
  "mercurio-plugin-api",
  "mercurio-requirements",
  "mercurio-sysml",
@@ -798,7 +856,7 @@ dependencies = [
 name = "mercurio-requirements"
 version = "0.1.0"
 dependencies = [
- "mercurio-foundation",
+ "mercurio-core",
  "serde",
  "serde_json",
 ]
@@ -814,16 +872,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "mercurio-semantic-services"
+version = "0.1.0"
+dependencies = [
+ "mercurio-authoring",
+ "mercurio-kir",
+ "mercurio-model",
+ "mercurio-runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mercurio-session"
+version = "0.1.0"
+dependencies = [
+ "mercurio-analysis",
+ "mercurio-authoring",
+ "mercurio-kir",
+ "mercurio-semantic-services",
+ "mercurio-workspace",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mercurio-sysml"
 version = "0.1.0"
 dependencies = [
- "mercurio-foundation",
+ "mercurio-core",
  "mercurio-kerml",
  "mercurio-kir",
  "mercurio-language-contracts",
  "mercurio-language-frontend",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "mercurio-workspace"
+version = "0.1.0"
+dependencies = [
+ "mercurio-authoring",
+ "mercurio-kir",
+ "mercurio-language-contracts",
+ "mercurio-model",
+ "mercurio-runtime",
+ "mercurio-semantic-services",
+ "serde",
+ "serde_json",
+ "zip",
 ]
 
 [[package]]

@@ -64,7 +64,7 @@ pub use mercurio_core::{
     SemanticGoalExplanation, SemanticGoalSpec, SemanticMutation, SemanticMutationCapabilityContext,
     SemanticReasoningContext, SemanticWorkspaceRef, SourceSpanRef, WorkspaceRevision,
     default_stdlib_path, design_intent_to_assessment_spec, design_intent_to_semantic_goal_spec,
-    stable_digest,
+    mutation_proposal_digest, stable_digest,
 };
 pub use mercurio_requirements::{
     default_model_quality_profile, evaluate_semantic_goal, explain_semantic_goal,
@@ -238,6 +238,14 @@ pub struct CheckedMutationProposal {
     pub proposal: MutationProposal,
     pub feasibility: MutationFeasibilityReport,
     pub revision_attempted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_viewed_at: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -404,12 +412,7 @@ where
         || first_report.suggested_supporting_changes.is_empty()
     {
         let proposal_id = checked_proposal_id(&first_report);
-        return CheckedMutationProposal {
-            proposal_id,
-            proposal,
-            feasibility: first_report,
-            revision_attempted: false,
-        };
+        return checked_mutation_proposal_record(proposal_id, proposal, first_report, false);
     }
 
     let mut revised = proposal.clone();
@@ -422,12 +425,7 @@ where
     });
     let revised_report = feasibility.check(context, &revised);
     let proposal_id = checked_proposal_id(&revised_report);
-    CheckedMutationProposal {
-        proposal_id,
-        proposal: revised,
-        feasibility: revised_report,
-        revision_attempted: true,
-    }
+    checked_mutation_proposal_record(proposal_id, revised, revised_report, true)
 }
 
 fn checked_proposal_id(report: &MutationFeasibilityReport) -> Option<String> {
@@ -435,6 +433,25 @@ fn checked_proposal_id(report: &MutationFeasibilityReport) -> Option<String> {
         .normalized_plan
         .as_ref()
         .map(|plan| plan.proposal_id.clone())
+}
+
+fn checked_mutation_proposal_record(
+    proposal_id: Option<String>,
+    proposal: MutationProposal,
+    feasibility: MutationFeasibilityReport,
+    revision_attempted: bool,
+) -> CheckedMutationProposal {
+    let proposed_digest = mutation_proposal_digest(&proposal);
+    CheckedMutationProposal {
+        proposal_id,
+        proposal,
+        feasibility,
+        revision_attempted,
+        created_at: None,
+        first_viewed_at: None,
+        decided_at: None,
+        proposed_digest: Some(proposed_digest),
+    }
 }
 
 pub fn default_reasoning_provider() -> ResolvedReasoningProvider {
