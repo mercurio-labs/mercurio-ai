@@ -19,15 +19,17 @@ use mercurio_reference_capabilities::{
 };
 use mercurio_requirements::{evaluate_semantic_goal, explain_semantic_goal};
 use mercurio_sysml::{
-    SemanticCompileStatus, compile_sysml_text, compile_sysml_text_with_context_report,
+    SemanticCompileStatus, SysmlMutationFeasibilityService, compile_sysml_text,
+    compile_sysml_text_with_context_report,
     enrich_sysml_semantic_reasoning_context_with_child_affordances,
     load_authoring_project_from_sysml, sysml_mutation_feasibility_service,
     sysml_semantic_reasoning_context_from_authoring_project,
 };
 
 use crate::{
-    SemanticAgentMode, SemanticAgentRun, SemanticAgentRunRequest, SemanticAgentRunStatus,
-    SemanticAgentStep, SemanticAgentToolFinding, SemanticAgentToolKind, SemanticAgentToolMode,
+    AgentToolInvocation, AgentToolInvocationResult, AgentToolSurface, SemanticAgentMode,
+    SemanticAgentRun, SemanticAgentRunRequest, SemanticAgentRunStatus, SemanticAgentStep,
+    SemanticAgentToolFinding, SemanticAgentToolKind, SemanticAgentToolMode,
     SemanticAgentToolResult, SemanticContextBuilder, SemanticMutationProposalProvider,
     SemanticMutationProposalRequest, VariantExplorationCandidate, VariantExplorationReport,
     propose_checked_semantic_mutations,
@@ -40,19 +42,73 @@ pub fn run_semantic_mutation_agent<P>(
 where
     P: SemanticMutationProposalProvider,
 {
+    run_semantic_mutation_agent_inner(provider, request, None, None)
+}
+
+pub fn run_semantic_mutation_agent_with_tool_surface<P, T>(
+    provider: &P,
+    request: SemanticAgentRunRequest,
+    tool_surface: &T,
+) -> SemanticAgentRun
+where
+    P: SemanticMutationProposalProvider,
+    T: AgentToolSurface,
+{
+    run_semantic_mutation_agent_inner(provider, request, None, Some(tool_surface))
+}
+
+pub fn run_semantic_mutation_agent_from_project_with_tool_surface<P, T>(
+    provider: &P,
+    request: SemanticAgentRunRequest,
+    project: mercurio_core::AuthoringProject,
+    tool_surface: &T,
+) -> SemanticAgentRun
+where
+    P: SemanticMutationProposalProvider,
+    T: AgentToolSurface,
+{
+    run_semantic_mutation_agent_inner(provider, request, Some(project), Some(tool_surface))
+}
+
+fn run_semantic_mutation_agent_inner<P>(
+    provider: &P,
+    request: SemanticAgentRunRequest,
+    initial_project: Option<mercurio_core::AuthoringProject>,
+    tool_surface: Option<&dyn AgentToolSurface>,
+) -> SemanticAgentRun
+where
+    P: SemanticMutationProposalProvider,
+{
     let selected_tools = select_semantic_agent_tools(&request);
-    let mut files = request.initial_files;
-    let mut project = match load_authoring_project_from_sysml(files.clone()) {
-        Ok(project) => project,
-        Err(err) => {
-            return SemanticAgentRun {
-                goal: request.goal,
-                status: SemanticAgentRunStatus::Failed,
-                stop_reason: format!("failed to load initial SysML: {err}"),
-                steps: Vec::new(),
-                final_files: files,
-                final_workspace_revision: WorkspaceRevision::unchecked(),
-            };
+    let (mut project, mut files) = match initial_project {
+        Some(project) => match render_authoring_project_files(&project) {
+            Ok(files) => (project, files),
+            Err(err) => {
+                return SemanticAgentRun {
+                    goal: request.goal,
+                    status: SemanticAgentRunStatus::Failed,
+                    stop_reason: format!("failed to render initial workspace project: {err}"),
+                    steps: Vec::new(),
+                    final_files: BTreeMap::new(),
+                    final_workspace_revision: WorkspaceRevision::unchecked(),
+                };
+            }
+        },
+        None => {
+            let files = request.initial_files;
+            match load_authoring_project_from_sysml(files.clone()) {
+                Ok(project) => (project, files),
+                Err(err) => {
+                    return SemanticAgentRun {
+                        goal: request.goal,
+                        status: SemanticAgentRunStatus::Failed,
+                        stop_reason: format!("failed to load initial SysML: {err}"),
+                        steps: Vec::new(),
+                        final_files: files,
+                        final_workspace_revision: WorkspaceRevision::unchecked(),
+                    };
+                }
+            }
         }
     };
     let feasibility = sysml_mutation_feasibility_service();
@@ -80,6 +136,7 @@ where
             &context.workspace_revision,
             &request.goal,
             index,
+            tool_surface,
         );
         let mut tool_results = tool_results;
         tool_results.extend(source_diagnostic_tool_results(
@@ -221,47 +278,43 @@ where
             };
         };
 
-        let plan = selected
-            .feasibility
-            .normalized_plan
-            .as_ref()
-            .expect("checked above");
-        let applied = match feasibility.apply_checked_plan(&context, plan) {
-            Ok(applied) => applied,
-            Err(err) => {
-                let stop_reason = format!("failed to apply checked plan: {}", err.message);
-                let revision = context.workspace_revision.clone();
-                steps.push(SemanticAgentStep {
-                    index,
-                    workspace_revision: revision.clone(),
-                    semantic_context,
-                    goal_evaluation: evaluate_current_goal(
-                        goal_spec.as_ref(),
-                        &context.project,
-                        &request.focus,
-                    ),
-                    quality_evaluation: evaluate_current_goal(
-                        quality_goal.as_ref(),
-                        &context.project,
-                        &request.focus,
-                    ),
-                    tool_results,
-                    proposals,
-                    selected_proposal_index: Some(selected_index),
-                    variant_exploration: None,
-                    applied: None,
-                    stop_reason: Some(stop_reason.clone()),
-                });
-                return SemanticAgentRun {
-                    goal: request.goal,
-                    status: SemanticAgentRunStatus::Failed,
-                    stop_reason,
-                    steps,
-                    final_files: files,
-                    final_workspace_revision: revision,
-                };
-            }
-        };
+        let applied =
+            match apply_selected_proposal(tool_surface, &feasibility, &context, selected, &files) {
+                Ok(applied) => applied,
+                Err(message) => {
+                    let stop_reason = message;
+                    let revision = context.workspace_revision.clone();
+                    steps.push(SemanticAgentStep {
+                        index,
+                        workspace_revision: revision.clone(),
+                        semantic_context,
+                        goal_evaluation: evaluate_current_goal(
+                            goal_spec.as_ref(),
+                            &context.project,
+                            &request.focus,
+                        ),
+                        quality_evaluation: evaluate_current_goal(
+                            quality_goal.as_ref(),
+                            &context.project,
+                            &request.focus,
+                        ),
+                        tool_results,
+                        proposals,
+                        selected_proposal_index: Some(selected_index),
+                        variant_exploration: None,
+                        applied: None,
+                        stop_reason: Some(stop_reason.clone()),
+                    });
+                    return SemanticAgentRun {
+                        goal: request.goal,
+                        status: SemanticAgentRunStatus::Failed,
+                        stop_reason,
+                        steps,
+                        final_files: files,
+                        final_workspace_revision: revision,
+                    };
+                }
+            };
 
         files.extend(applied.edited_files.clone());
         project = match load_authoring_project_from_sysml(files.clone()) {
@@ -353,6 +406,128 @@ where
         final_files: files,
         final_workspace_revision: final_context.workspace_revision,
     }
+}
+
+fn apply_selected_proposal(
+    tool_surface: Option<&dyn AgentToolSurface>,
+    feasibility: &SysmlMutationFeasibilityService,
+    context: &MutationContext,
+    selected: &crate::CheckedMutationProposal,
+    files: &BTreeMap<String, String>,
+) -> Result<mercurio_core::MutationApplicationResult, String> {
+    if let Some(tool_surface) = tool_surface {
+        return apply_selected_proposal_through_surface(tool_surface, selected, files, context);
+    }
+
+    let plan = selected
+        .feasibility
+        .normalized_plan
+        .as_ref()
+        .ok_or_else(|| "selected proposal did not include a normalized plan".to_string())?;
+    feasibility
+        .apply_checked_plan(context, plan)
+        .map_err(|err| format!("failed to apply checked plan: {}", err.message))
+}
+
+fn apply_selected_proposal_through_surface(
+    tool_surface: &dyn AgentToolSurface,
+    selected: &crate::CheckedMutationProposal,
+    _files: &BTreeMap<String, String>,
+    context: &MutationContext,
+) -> Result<mercurio_core::MutationApplicationResult, String> {
+    let advertised_tools = tool_surface
+        .list_agent_tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<BTreeSet<_>>();
+    for required_tool in ["check_changes", "apply_changes"] {
+        if !advertised_tools.contains(required_tool) {
+            return Err(format!(
+                "shared agent tool `{required_tool}` is not visible at the configured autonomy level"
+            ));
+        }
+    }
+
+    let proposal = serde_json::to_value(&selected.proposal)
+        .map_err(|err| format!("failed to encode selected proposal: {err}"))?;
+    let workspace_revision = serde_json::to_value(&context.workspace_revision)
+        .map_err(|err| format!("failed to encode workspace revision: {err}"))?;
+    let checked = tool_surface.invoke_agent_tool(AgentToolInvocation {
+        name: "check_changes".to_string(),
+        arguments: json!({
+            "proposal": proposal,
+            "workspaceRevision": workspace_revision,
+        }),
+    });
+    let checked_result = checked.result.clone().unwrap_or(Value::Null);
+    if !checked.ok {
+        return Err(format!(
+            "shared check_changes failed: {}",
+            checked.error.unwrap_or_else(|| "unknown error".to_string())
+        ));
+    }
+    let checked_proposal = checked_result.get("checked").ok_or_else(|| {
+        "shared check_changes response did not include checked proposal".to_string()
+    })?;
+    let proposal_id = checked_proposal
+        .get("proposalId")
+        .and_then(Value::as_str)
+        .or_else(|| selected.proposal_id.as_deref())
+        .ok_or_else(|| "shared check_changes response did not include proposalId".to_string())?;
+    let proposed_digest = checked_proposal
+        .get("proposedDigest")
+        .and_then(Value::as_str)
+        .or(selected.proposed_digest.as_deref())
+        .ok_or_else(|| {
+            "shared check_changes response did not include proposedDigest".to_string()
+        })?;
+
+    let applied = tool_surface.invoke_agent_tool(AgentToolInvocation {
+        name: "apply_changes".to_string(),
+        arguments: json!({
+            "proposal": serde_json::to_value(&selected.proposal)
+                .map_err(|err| format!("failed to encode selected proposal: {err}"))?,
+            "proposalId": proposal_id,
+            "proposedDigest": proposed_digest,
+            "workspaceRevision": serde_json::to_value(&context.workspace_revision)
+                .map_err(|err| format!("failed to encode workspace revision: {err}"))?,
+            "actor": "assistant",
+        }),
+    });
+    let applied_result = applied.result.clone().unwrap_or(Value::Null);
+    if !applied.ok {
+        return Err(format!(
+            "shared apply_changes failed: {}",
+            applied.error.unwrap_or_else(|| "unknown error".to_string())
+        ));
+    }
+    if applied_result
+        .get("applied")
+        .and_then(Value::as_bool)
+        .is_some_and(|applied| !applied)
+    {
+        return Err("shared apply_changes returned applied=false".to_string());
+    }
+    let application = applied_result
+        .get("application")
+        .cloned()
+        .ok_or_else(|| "shared apply_changes response did not include application".to_string())?;
+    serde_json::from_value(application)
+        .map_err(|err| format!("failed to decode shared apply_changes application: {err}"))
+}
+
+fn render_authoring_project_files(
+    project: &mercurio_core::AuthoringProject,
+) -> Result<BTreeMap<String, String>, String> {
+    project
+        .files()
+        .map(|(path, _)| {
+            project
+                .render_new_file(path)
+                .map(|content| (path.to_string(), content))
+                .map_err(|err| err.to_string())
+        })
+        .collect()
 }
 
 fn evaluate_current_goal(
@@ -571,9 +746,13 @@ fn run_semantic_agent_tools(
     workspace_revision: &WorkspaceRevision,
     goal: &str,
     step_index: usize,
+    tool_surface: Option<&dyn AgentToolSurface>,
 ) -> Vec<SemanticAgentToolResult> {
     if tools.is_empty() {
         return Vec::new();
+    }
+    if let Some(tool_surface) = tool_surface {
+        return run_semantic_agent_tools_through_surface(tool_surface, tools, goal, step_index);
     }
     if tools
         .iter()
@@ -646,6 +825,152 @@ fn run_semantic_agent_tools(
             tool_result_from_report(tool, report)
         })
         .collect()
+}
+
+fn run_semantic_agent_tools_through_surface(
+    tool_surface: &dyn AgentToolSurface,
+    tools: &[SemanticAgentToolKind],
+    goal: &str,
+    step_index: usize,
+) -> Vec<SemanticAgentToolResult> {
+    let advertised_tools = tool_surface
+        .list_agent_tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<BTreeSet<_>>();
+
+    tools
+        .iter()
+        .copied()
+        .map(|tool| {
+            let Some(invocation) = agent_surface_invocation_for_tool(tool, goal, step_index) else {
+                return tool_error_result(
+                    tool,
+                    format!(
+                        "no shared agent tool-surface mapping exists for {}",
+                        semantic_agent_tool_id(tool)
+                    ),
+                );
+            };
+            if !advertised_tools.contains(&invocation.name) {
+                return tool_error_result(
+                    tool,
+                    format!(
+                        "shared agent tool `{}` is not visible at the configured autonomy level",
+                        invocation.name
+                    ),
+                );
+            }
+            let tool_name = invocation.name.clone();
+            let result = tool_surface.invoke_agent_tool(invocation);
+            tool_result_from_agent_surface(tool, &tool_name, result)
+        })
+        .collect()
+}
+
+fn agent_surface_invocation_for_tool(
+    tool: SemanticAgentToolKind,
+    goal: &str,
+    step_index: usize,
+) -> Option<AgentToolInvocation> {
+    let request_id = format!(
+        "semantic_agent.step{step_index}.{}",
+        semantic_agent_tool_id(tool)
+    );
+    match tool {
+        SemanticAgentToolKind::AnalysisOpportunities => Some(AgentToolInvocation {
+            name: "get_opportunities".to_string(),
+            arguments: Value::Null,
+        }),
+        SemanticAgentToolKind::RequirementCoverage => Some(AgentToolInvocation {
+            name: "run_capability".to_string(),
+            arguments: json!({
+                "capabilityId": "sysml.requirement.analysis",
+                "requestId": request_id,
+                "parameters": {},
+            }),
+        }),
+        SemanticAgentToolKind::SemanticImpact => Some(AgentToolInvocation {
+            name: "run_capability".to_string(),
+            arguments: json!({
+                "capabilityId": "foundation.impact.graph",
+                "requestId": request_id,
+                "parameters": {},
+            }),
+        }),
+        SemanticAgentToolKind::StateSimulation => Some(AgentToolInvocation {
+            name: "run_capability".to_string(),
+            arguments: json!({
+                "capabilityId": "sysml.behavior.dynamic",
+                "requestId": request_id,
+                "parameters": {},
+            }),
+        }),
+        SemanticAgentToolKind::ModelInspection => Some(AgentToolInvocation {
+            name: "run_capability".to_string(),
+            arguments: json!({
+                "capabilityId": "foundation.inspect.model",
+                "requestId": request_id,
+                "parameters": {
+                    "query": goal,
+                    "limit": 8,
+                    "analysis_scope": model_inspection_analysis_scope(goal).as_str(),
+                },
+            }),
+        }),
+        SemanticAgentToolKind::SourceDiagnostics => Some(AgentToolInvocation {
+            name: "get_diagnostics".to_string(),
+            arguments: Value::Null,
+        }),
+    }
+}
+
+fn tool_result_from_agent_surface(
+    tool: SemanticAgentToolKind,
+    tool_name: &str,
+    result: AgentToolInvocationResult,
+) -> SemanticAgentToolResult {
+    if !result.ok {
+        return SemanticAgentToolResult {
+            tool,
+            status: "error".to_string(),
+            summary: vec![format!(
+                "Shared agent tool `{tool_name}` failed: {}",
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "unknown error".to_string())
+            )],
+            findings: vec![SemanticAgentToolFinding {
+                id: format!("semantic_agent.tool_error.{}", semantic_agent_tool_id(tool)),
+                severity: "error".to_string(),
+                title: "Shared agent tool failed".to_string(),
+                message: result
+                    .error
+                    .unwrap_or_else(|| "shared agent tool returned an error".to_string()),
+                elements: Vec::new(),
+            }],
+            artifact: json!({
+                "schema": "mercurio.ai.shared_tool_surface_result.v1",
+                "mcpToolName": tool_name,
+            }),
+        };
+    }
+
+    let raw_result = result.result.unwrap_or(Value::Null);
+    SemanticAgentToolResult {
+        tool,
+        status: "passed".to_string(),
+        summary: vec![format!(
+            "Shared agent tool `{tool_name}` completed successfully."
+        )],
+        findings: Vec::new(),
+        artifact: json!({
+            "schema": "mercurio.ai.shared_tool_surface_result.v1",
+            "mcpToolName": tool_name,
+            "result": raw_result,
+        }),
+    }
 }
 
 fn source_diagnostic_tool_results(
