@@ -14,11 +14,15 @@ mod provider_prompts;
 mod provider_registry;
 mod provider_resolution;
 mod schema;
+mod tool_surface;
 mod workbench;
-pub use agent::run_semantic_mutation_agent;
 #[cfg(test)]
 pub(crate) use agent::select_semantic_agent_tools;
 pub(crate) use agent::semantic_agent_tool_id;
+pub use agent::{
+    run_semantic_mutation_agent, run_semantic_mutation_agent_from_project_with_tool_surface,
+    run_semantic_mutation_agent_with_tool_surface,
+};
 pub(crate) use artifacts::chat_completion_response;
 pub use ask_mercurio::classify_ask_mercurio_task;
 pub(crate) use ask_mercurio::{
@@ -52,6 +56,9 @@ use provider_resolution::{
     configured_provider_missing_message, heuristic_provider, resolve_reasoning_provider_from_env,
 };
 pub use schema::*;
+pub use tool_surface::{
+    AgentToolDescriptor, AgentToolInvocation, AgentToolInvocationResult, AgentToolSurface,
+};
 pub use workbench::run_configured_workbench_interaction;
 
 pub use mercurio_core::{
@@ -622,16 +629,18 @@ pub(crate) fn latest_user_content(messages: &[ChatMessage]) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Mutex;
 
     use mercurio_core::{
-        AuthoringProject, FeasibilityStatus, MutationContext, default_model_quality_profile,
+        AuthoringProject, FeasibilityStatus, MutationApplicationResult, MutationContext,
+        SemanticDiff, default_model_quality_profile,
     };
     use mercurio_sysml::{
         load_authoring_project_from_sysml, sysml_mutation_feasibility_service,
         sysml_semantic_reasoning_context_from_authoring_project,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{
         AnthropicMessageResponse, CheckedMutationProposal, MutationProposal,
@@ -642,15 +651,17 @@ mod tests {
         configured_reasoning_provider, extract_anthropic_tool_input, extract_output_text,
         heuristic_provider, normalize_azure_openai_base_url,
         parse_semantic_mutation_proposals_payload, propose_checked_semantic_mutations,
-        run_semantic_mutation_agent, semantic_mutation_proposal_schema,
+        run_semantic_mutation_agent, run_semantic_mutation_agent_from_project_with_tool_surface,
+        run_semantic_mutation_agent_with_tool_surface, semantic_mutation_proposal_schema,
         semantic_mutation_proposal_user_prompt, summarize_semantic_changes,
         test_configured_reasoning_provider_connection,
     };
     use crate::{
+        AgentToolDescriptor, AgentToolInvocation, AgentToolInvocationResult, AgentToolSurface,
         AskMercurioArtifact, AskMercurioTask, ElementRef, ReasoningProvider, ReasoningProviderKind,
         SemanticAgentMode, SemanticAgentRunRequest, SemanticAgentRunStatus,
         SemanticAgentToolFinding, SemanticAgentToolKind, SemanticAgentToolResult, SemanticMutation,
-        WorkspaceRevision, explain_semantic_goal,
+        WorkspaceRevision, explain_semantic_goal, mutation_proposal_digest,
     };
 
     struct FixedProposalProvider {
@@ -688,6 +699,136 @@ mod tests {
                 rationale: None,
                 workspace_revision: request.workspace_revision.clone(),
             }]
+        }
+    }
+
+    struct RecordingToolSurface;
+
+    impl AgentToolSurface for RecordingToolSurface {
+        fn list_agent_tools(&self) -> Vec<AgentToolDescriptor> {
+            vec![AgentToolDescriptor {
+                name: "run_capability".to_string(),
+                description: Some("Run a shared capability.".to_string()),
+                input_schema: None,
+                annotations: None,
+            }]
+        }
+
+        fn invoke_agent_tool(&self, invocation: AgentToolInvocation) -> AgentToolInvocationResult {
+            AgentToolInvocationResult {
+                name: invocation.name.clone(),
+                ok: true,
+                result: Some(json!({
+                    "invoked": invocation.name,
+                    "arguments": invocation.arguments,
+                })),
+                error: None,
+            }
+        }
+    }
+
+    struct RecordingWriteToolSurface {
+        invocations: Mutex<Vec<AgentToolInvocation>>,
+    }
+
+    impl RecordingWriteToolSurface {
+        fn new() -> Self {
+            Self {
+                invocations: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AgentToolSurface for RecordingWriteToolSurface {
+        fn list_agent_tools(&self) -> Vec<AgentToolDescriptor> {
+            ["check_changes", "apply_changes"]
+                .into_iter()
+                .map(|name| AgentToolDescriptor {
+                    name: name.to_string(),
+                    description: Some(format!("Shared {name} tool.")),
+                    input_schema: None,
+                    annotations: None,
+                })
+                .collect()
+        }
+
+        fn invoke_agent_tool(&self, invocation: AgentToolInvocation) -> AgentToolInvocationResult {
+            self.invocations.lock().unwrap().push(invocation.clone());
+            match invocation.name.as_str() {
+                "check_changes" => {
+                    let proposal = invocation
+                        .arguments
+                        .get("proposal")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let proposal_digest =
+                        serde_json::from_value::<MutationProposal>(proposal.clone())
+                            .map(|proposal| mutation_proposal_digest(&proposal))
+                            .unwrap_or_else(|_| "test-digest".to_string());
+                    AgentToolInvocationResult {
+                        name: invocation.name,
+                        ok: true,
+                        result: Some(json!({
+                            "workspaceRevision": invocation.arguments.get("workspaceRevision").cloned().unwrap_or(Value::Null),
+                            "checked": {
+                                "proposalId": "checked.shared.1",
+                                "proposal": proposal,
+                                "proposedDigest": proposal_digest,
+                            }
+                        })),
+                        error: None,
+                    }
+                }
+                "apply_changes" => {
+                    let application = MutationApplicationResult {
+                        changed_files: BTreeSet::from(["model.sysml".to_string()]),
+                        edited_files: BTreeMap::from([(
+                            "model.sysml".to_string(),
+                            "package Demo { part def UAVInterceptor; }".to_string(),
+                        )]),
+                        changed_declarations: BTreeSet::from(["Demo.UAVInterceptor".to_string()]),
+                        semantic_diff: SemanticDiff::default(),
+                        proposed_digest: invocation
+                            .arguments
+                            .get("proposedDigest")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        applied_digest: Some("applied.shared.1".to_string()),
+                        decided_at: Some(1),
+                        supersedes: None,
+                        reverts: None,
+                        actor: invocation
+                            .arguments
+                            .get("actor")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    };
+                    AgentToolInvocationResult {
+                        name: invocation.name,
+                        ok: true,
+                        result: Some(json!({
+                            "workspaceRevision": invocation.arguments.get("workspaceRevision").cloned().unwrap_or(Value::Null),
+                            "feasibility": {
+                                "status": "Allowed",
+                                "blockingReasons": [],
+                                "warnings": [],
+                                "repairHints": [],
+                                "requiredChoices": [],
+                                "normalizedPlan": null,
+                            },
+                            "applied": true,
+                            "application": application,
+                        })),
+                        error: None,
+                    }
+                }
+                other => AgentToolInvocationResult {
+                    name: other.to_string(),
+                    ok: false,
+                    result: None,
+                    error: Some("unexpected tool".to_string()),
+                },
+            }
         }
     }
 
@@ -1294,6 +1435,129 @@ package HybridVehicle {
                 })),
             "{run:#?}"
         );
+    }
+
+    #[test]
+    fn semantic_agent_can_run_auto_tools_through_shared_tool_surface() {
+        let run = run_semantic_mutation_agent_with_tool_surface(
+            &FixedProposalProvider {
+                proposals: Vec::new(),
+            },
+            SemanticAgentRunRequest {
+                goal: "Improve requirement coverage".to_string(),
+                agent_mode: crate::SemanticAgentMode::ApplyFirstFeasible,
+                goal_spec: None,
+                quality_goal: None,
+                minimum_quality_score: None,
+                initial_files: BTreeMap::from([(
+                    "model.sysml".to_string(),
+                    "package Demo {}".to_string(),
+                )]),
+                source_diagnostic_files: BTreeMap::new(),
+                focus: Vec::new(),
+                max_steps: 1,
+                reasoning_tools: Vec::new(),
+                tool_mode: crate::SemanticAgentToolMode::Auto,
+            },
+            &RecordingToolSurface,
+        );
+
+        let result = run
+            .steps
+            .first()
+            .and_then(|step| {
+                step.tool_results
+                    .iter()
+                    .find(|result| result.tool == crate::SemanticAgentToolKind::RequirementCoverage)
+            })
+            .expect("requirement coverage tool result");
+        assert_eq!(result.status, "passed");
+        assert_eq!(result.artifact["mcpToolName"], "run_capability");
+        assert_eq!(
+            result.artifact["result"]["arguments"]["capabilityId"],
+            "sysml.requirement.analysis"
+        );
+    }
+
+    #[test]
+    fn semantic_agent_applies_selected_proposal_through_shared_tool_surface() {
+        let tool_surface = RecordingWriteToolSurface::new();
+        let run = run_semantic_mutation_agent_with_tool_surface(
+            &RequestRevisionProposalProvider,
+            SemanticAgentRunRequest {
+                goal: "Create a UAV interceptor".to_string(),
+                agent_mode: crate::SemanticAgentMode::ApplyFirstFeasible,
+                goal_spec: None,
+                quality_goal: None,
+                minimum_quality_score: None,
+                initial_files: BTreeMap::from([(
+                    "model.sysml".to_string(),
+                    "package Demo {}".to_string(),
+                )]),
+                source_diagnostic_files: BTreeMap::new(),
+                focus: Vec::new(),
+                max_steps: 1,
+                reasoning_tools: Vec::new(),
+                tool_mode: crate::SemanticAgentToolMode::Off,
+            },
+            &tool_surface,
+        );
+
+        assert_eq!(run.status, SemanticAgentRunStatus::Completed, "{run:#?}");
+        let step = run.steps.first().expect("agent step");
+        let applied = step.applied.as_ref().expect("shared application");
+        assert_eq!(applied.actor.as_deref(), Some("assistant"));
+        assert!(run.final_files["model.sysml"].contains("UAVInterceptor"));
+
+        let invocations = tool_surface.invocations.lock().unwrap();
+        assert_eq!(invocations.len(), 2);
+        assert_eq!(invocations[0].name, "check_changes");
+        assert_eq!(invocations[1].name, "apply_changes");
+        assert!(invocations[0].arguments.get("files").is_none());
+        assert!(invocations[1].arguments.get("files").is_none());
+        assert_eq!(invocations[1].arguments["actor"], "assistant");
+        assert_eq!(invocations[1].arguments["proposalId"], "checked.shared.1");
+        assert_eq!(
+            invocations[1].arguments["proposedDigest"],
+            invocations[0].arguments["proposal"]
+                .as_object()
+                .and_then(|_| applied.proposed_digest.as_deref())
+                .unwrap_or("")
+        );
+    }
+
+    #[test]
+    fn semantic_agent_can_start_from_workspace_project_through_shared_tool_surface() {
+        let tool_surface = RecordingWriteToolSurface::new();
+        let run = run_semantic_mutation_agent_from_project_with_tool_surface(
+            &RequestRevisionProposalProvider,
+            SemanticAgentRunRequest {
+                goal: "Create a UAV interceptor".to_string(),
+                agent_mode: crate::SemanticAgentMode::ApplyFirstFeasible,
+                goal_spec: None,
+                quality_goal: None,
+                minimum_quality_score: None,
+                initial_files: BTreeMap::new(),
+                source_diagnostic_files: BTreeMap::new(),
+                focus: Vec::new(),
+                max_steps: 1,
+                reasoning_tools: Vec::new(),
+                tool_mode: crate::SemanticAgentToolMode::Off,
+            },
+            load_authoring_project_from_sysml(BTreeMap::from([(
+                "model.sysml".to_string(),
+                "package Demo {}".to_string(),
+            )]))
+            .unwrap(),
+            &tool_surface,
+        );
+
+        assert_eq!(run.status, SemanticAgentRunStatus::Completed, "{run:#?}");
+        assert!(run.final_files["model.sysml"].contains("UAVInterceptor"));
+        let invocations = tool_surface.invocations.lock().unwrap();
+        assert_eq!(invocations.len(), 2);
+        assert!(invocations[0].arguments.get("files").is_none());
+        assert!(invocations[1].arguments.get("files").is_none());
     }
 
     #[test]
