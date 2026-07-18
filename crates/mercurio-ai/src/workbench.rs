@@ -103,6 +103,28 @@ pub fn run_configured_workbench_interaction(
     if let Some(workspace) = request.workspace.as_ref() {
         context.extend(ai_workspace_input_context_lines(workspace));
     }
+    if let Some(centaur_context) = request.centaur_context.as_ref() {
+        context.push(format!(
+            "Centaur session: {} ({} / {}); active model binding: {}; autonomy: {}",
+            centaur_context.session_id,
+            centaur_context.profile,
+            centaur_context.surface,
+            centaur_context.active_model_binding_id.as_deref().unwrap_or("none"),
+            centaur_context.autonomy_level,
+        ));
+        if !centaur_context.model_refs.is_empty() {
+            context.push(format!(
+                "Exact model bindings: {}",
+                centaur_context.model_refs.iter().map(|model| format!(
+                    "{}={} ({}, {})",
+                    model.binding_id,
+                    model.model_handle_id,
+                    model.role,
+                    if model.writable { "writable" } else { "read-only" },
+                )).collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
     let cognitive_context = request.cognitive_context.clone();
 
     let chat_request = ChatCompletionRequest {
@@ -213,6 +235,7 @@ mod tests {
             focus: vec![focus],
             workspace: None,
             cognitive_context: None,
+            centaur_context: None,
         };
         let agent_request = exploration_agent_request(
             &request,
@@ -258,6 +281,7 @@ mod tests {
                 }],
             }),
             cognitive_context: None,
+            centaur_context: None,
         };
 
         let baseline = request

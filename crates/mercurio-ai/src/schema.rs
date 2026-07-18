@@ -92,6 +92,38 @@ pub struct AiWorkbenchRequest {
     pub workspace: Option<AiWorkspaceInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cognitive_context: Option<CognitiveContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub centaur_context: Option<CentaurSessionContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CentaurSessionModelRef {
+    pub binding_id: String,
+    pub model_handle_id: String,
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    pub writable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CentaurSessionContext {
+    pub session_id: String,
+    pub profile: String,
+    pub surface: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_model_binding_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_refs: Vec<CentaurSessionModelRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_element_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_capabilities: Vec<String>,
+    pub autonomy_level: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
