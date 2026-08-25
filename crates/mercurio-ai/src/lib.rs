@@ -788,6 +788,7 @@ mod tests {
                         )]),
                         changed_declarations: BTreeSet::from(["Demo.UAVInterceptor".to_string()]),
                         semantic_diff: SemanticDiff::default(),
+                        write_back_mode: None,
                         proposed_digest: invocation
                             .arguments
                             .get("proposedDigest")
